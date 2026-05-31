@@ -6,7 +6,8 @@ services:
 
     # Environment variables from .env file
     env_file:
-      - .env
+      - path: .env
+        required: false
 
     # Volume mounts for persistent data
     volumes:

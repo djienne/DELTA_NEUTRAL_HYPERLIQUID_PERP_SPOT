@@ -1,3 +1,5 @@
+import { requireLiveTradingTest } from '../utils/live-guard.js';
+requireLiveTradingTest('tests/test-spot-perp-transfer.js');
 import { ethers } from 'ethers';
 import dotenv from 'dotenv';
 import fetch from 'node-fetch';

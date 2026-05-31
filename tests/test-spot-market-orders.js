@@ -1,3 +1,5 @@
+import { requireLiveTradingTest } from '../utils/live-guard.js';
+requireLiveTradingTest('tests/test-spot-market-orders.js');
 import HyperliquidConnector from '../hyperliquid.js';
 import dotenv from 'dotenv';
 

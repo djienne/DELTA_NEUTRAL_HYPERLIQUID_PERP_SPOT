@@ -58,25 +58,10 @@ async function getSingleSpread(hyperliquid, symbol, isSpot) {
     }
 
     // Get L2 book snapshot
-    const url = 'https://api.hyperliquid.xyz/info';
-    const payload = {
-      type: 'l2Book',
-      coin: coin,
-      nSigFigs: 5,
-      mantissa: null
-    };
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch L2 book for ${coin}: ${response.statusText}`);
-    }
-
-    const l2Book = await response.json();
+    const l2Book = await hyperliquid.infoRequest(
+      hyperliquid.buildL2BookPayload(coin),
+      2
+    );
 
     if (!l2Book.levels || l2Book.levels.length !== 2) {
       throw new Error('Invalid L2 book format');

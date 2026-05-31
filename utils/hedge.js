@@ -14,7 +14,12 @@ import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral } from './positi
  * @returns {Promise<Object>} Analysis with hedge recommendations
  */
 export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
-  const { minValueUSD = 1, verbose = false } = options;
+  const {
+    minValueUSD = 1,
+    verbose = false,
+    managedSpotSymbols = null,
+    maxHedgeMismatchPercent = 30
+  } = options;
 
   if (verbose) {
     console.log('[Hedge] Analyzing positions for hedge needs...');
@@ -23,11 +28,11 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
   // Fetch current positions
   const [perpPositions, spotBalances] = await Promise.all([
     getPerpPositions(hyperliquid, null, { verbose: false }),
-    getSpotBalances(hyperliquid, null, { verbose: false })
+    getSpotBalances(hyperliquid, null, { verbose: false, managedSpotSymbols })
   ]);
 
   // Analyze for delta-neutral pairs
-  const analysis = analyzeDeltaNeutral(perpPositions, spotBalances);
+  const analysis = analyzeDeltaNeutral(perpPositions, spotBalances, { maxHedgeMismatchPercent });
 
   // Get prices for all symbols
   const allMids = await hyperliquid.getAllMids();
@@ -40,7 +45,7 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
   const hedgeNeeds = [];
 
   // Check existing delta-neutral pairs for WEAK hedges that need strengthening
-  for (const pair of analysis.deltaNeutralPairs) {
+  for (const pair of [...analysis.deltaNeutralPairs, ...analysis.imbalancedPairs]) {
     // Only strengthen if mismatch is significant (> 5%) and it's actually delta-neutral
     if (pair.isDeltaNeutral && pair.sizeMismatchPct > 5) {
       const price = priceMap[pair.symbol] || 0;
@@ -107,7 +112,7 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
     if (value >= minValueUSD) {
       // If we have a SHORT perp, we need LONG spot (buy)
       // If we have a LONG perp, we need SHORT spot (sell)
-      const needSpotBuy = perpPos.side === 'short';
+      const needSpotBuy = perpPos.side === 'SHORT';
 
       hedgeNeeds.push({
         type: 'PERP_NEEDS_SPOT',
@@ -239,7 +244,9 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
   const {
     verbose = false,
     minValueUSD = 1,
-    fallbackToClose = true
+    fallbackToClose = true,
+    managedSpotSymbols = null,
+    maxHedgeMismatchPercent = 30
   } = options;
 
   if (verbose) {
@@ -248,7 +255,12 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
   }
 
   // Analyze what needs hedging
-  const analysis = await analyzeHedgeNeeds(hyperliquid, { minValueUSD, verbose: false });
+  const analysis = await analyzeHedgeNeeds(hyperliquid, {
+    minValueUSD,
+    verbose: false,
+    managedSpotSymbols,
+    maxHedgeMismatchPercent
+  });
 
   if (!analysis.needsHedging) {
     if (verbose) {
@@ -297,7 +309,7 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
         const closeSymbol = hedgeNeed.type === 'SPOT_NEEDS_PERP_SHORT' ? hedgeNeed.spotSymbol : hedgeNeed.perpSymbol;
         const closeIsSpot = hedgeNeed.type === 'SPOT_NEEDS_PERP_SHORT';
         const closeSize = hedgeNeed.type === 'SPOT_NEEDS_PERP_SHORT' ? hedgeNeed.spotSize : hedgeNeed.perpSize;
-        const closeSide = hedgeNeed.type === 'SPOT_NEEDS_PERP_SHORT' ? 'sell' : (hedgeNeed.perpSide === 'long' ? 'sell' : 'buy');
+        const closeSide = hedgeNeed.type === 'SPOT_NEEDS_PERP_SHORT' ? 'sell' : (hedgeNeed.perpSide === 'LONG' ? 'sell' : 'buy');
 
         // Get asset info
         const assetId = await hyperliquid.getAssetId(closeSymbol, closeIsSpot);
@@ -306,8 +318,9 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
 
         const closeResult = await hyperliquid.createMarketOrder(closeSymbol, closeSide, sizeRounded, {
           isSpot: closeIsSpot,
-          reduceOnly: true,
-          slippage: config.trading?.maxSlippagePercent || 5.0
+          reduceOnly: closeIsSpot ? false : true,
+          slippage: config.trading?.maxSlippagePercent || 5.0,
+          overrideMidPrice: hedgeNeed.currentPrice
         });
 
         const filled = closeResult.response?.data?.statuses?.[0]?.filled;

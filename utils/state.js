@@ -21,6 +21,41 @@ const DEFAULT_STATE = {
   history: []  // Historical positions
 };
 
+function compactOrderResult(result) {
+  const status = result?.response?.data?.statuses?.[0] || {};
+  const filled = status.filled || null;
+
+  return {
+    status: result?.status,
+    error: status.error || null,
+    oid: filled?.oid || null,
+    avgPx: filled?.avgPx !== undefined ? parseFloat(filled.avgPx) : null,
+    totalSz: filled?.totalSz !== undefined ? parseFloat(filled.totalSz) : null
+  };
+}
+
+function compactPositionData(positionData) {
+  return {
+    success: positionData.success,
+    symbol: positionData.symbol,
+    perpSymbol: positionData.perpSymbol,
+    spotSymbol: positionData.spotSymbol,
+    perpSize: positionData.perpSize,
+    spotSize: positionData.spotSize,
+    perpEntryPrice: positionData.perpEntryPrice,
+    spotEntryPrice: positionData.spotEntryPrice,
+    positionValue: positionData.positionValue,
+    fundingRate: positionData.fundingRate,
+    annualizedFunding: positionData.annualizedFunding,
+    openFeesActual: positionData.openFeesActual || 0,
+    openFeesEstimated: positionData.openFeesEstimated || 0,
+    orderSummary: {
+      perp: compactOrderResult(positionData.perpResult),
+      spot: compactOrderResult(positionData.spotResult)
+    }
+  };
+}
+
 /**
  * Load bot state from disk
  * @returns {Object} State object
@@ -84,7 +119,7 @@ export function hasPosition(state) {
  */
 export function recordPosition(state, positionData) {
   const position = {
-    ...positionData,
+    ...compactPositionData(positionData),
     openTime: Date.now(),
     lastCheckTime: Date.now()
   };
@@ -114,6 +149,19 @@ export function closePosition(state, closeData) {
     closeReason: closeData.reason,
     perpClosePrice: closeData.perpClosePrice,
     spotClosePrice: closeData.spotClosePrice,
+    perpPnl: closeData.perpPnl,
+    spotPnl: closeData.spotPnl,
+    pricePnl: closeData.pricePnl ?? ((closeData.perpPnl || 0) + (closeData.spotPnl || 0)),
+    fundingPnl: closeData.fundingPnl || 0,
+    feesActual: closeData.feesActual || 0,
+    feesEstimated: closeData.feesEstimated || 0,
+    pnl: {
+      price: closeData.pricePnl ?? ((closeData.perpPnl || 0) + (closeData.spotPnl || 0)),
+      funding: closeData.fundingPnl || 0,
+      feesActual: closeData.feesActual || 0,
+      feesEstimated: closeData.feesEstimated || 0,
+      total: closeData.totalPnl
+    },
     totalPnl: closeData.totalPnl,
     duration: Date.now() - state.position.openTime
   };
@@ -212,7 +260,7 @@ export function getHistoryStats(state) {
   }
 
   const totalPositions = state.history.length;
-  const totalPnl = state.history.reduce((sum, p) => sum + (p.totalPnl || 0), 0);
+  const totalPnl = state.history.reduce((sum, p) => sum + (p.pnl?.total ?? p.totalPnl ?? 0), 0);
   const avgDuration = state.history.reduce((sum, p) => sum + (p.duration || 0), 0) / totalPositions;
   const avgFundingRate = state.history.reduce((sum, p) => sum + (p.annualizedFunding || 0), 0) / totalPositions;
 

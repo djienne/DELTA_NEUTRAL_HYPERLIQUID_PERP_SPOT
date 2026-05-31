@@ -1,3 +1,5 @@
+import { requireLiveTradingTest } from '../utils/live-guard.js';
+requireLiveTradingTest('tests/test-hyperliquid-simple.js');
 import HyperliquidConnector from '../connectors/hyperliquid.js';
 
 /**

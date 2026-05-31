@@ -24,8 +24,9 @@ class HyperliquidConnector extends EventEmitter {
     }
 
     // Load credentials from environment or options
-    this.wallet = options.wallet || process.env.HL_WALLET;
-    this.privateKey = options.privateKey || process.env.HL_PRIVATE_KEY;
+    this.wallet = options.wallet !== undefined ? options.wallet : process.env.HL_WALLET;
+    this.privateKey = options.privateKey !== undefined ? options.privateKey : process.env.HL_PRIVATE_KEY;
+    this.fetch = options.fetch || fetch;
 
     // Initialize signer if private key is provided
     if (this.privateKey) {
@@ -73,9 +74,6 @@ class HyperliquidConnector extends EventEmitter {
     // Subscriptions
     this.subscriptions = new Set();
 
-    // Track polling requests per coin to avoid overlapping
-    this.pollingInProgress = new Map();
-
     // Rate limiters
     // WebSocket: max 2000 messages per minute, max 100 inflight
     this.wsRateLimiter = new SlidingWindowRateLimiter({
@@ -88,6 +86,8 @@ class HyperliquidConnector extends EventEmitter {
       maxRequests: 600, // 600 requests × 2 weight = 1200
       windowMs: 60000 // 1 minute
     });
+
+    this.restRateLimiter.maxRequests = 1200;
 
     // Track inflight WebSocket requests
     this.maxInflightRequests = options.maxInflightRequests || 90; // Max 100, use 90 for buffer
@@ -130,11 +130,7 @@ class HyperliquidConnector extends EventEmitter {
         });
 
         this.ws.on('pong', () => {
-          this.lastPongReceived = Date.now();
-          if (this.pongTimer) {
-            clearTimeout(this.pongTimer);
-            this.pongTimer = null;
-          }
+          this.handlePong();
         });
 
         this.ws.on('error', (error) => {
@@ -171,6 +167,86 @@ class HyperliquidConnector extends EventEmitter {
     });
   }
 
+  handlePong() {
+    this.lastPongReceived = Date.now();
+    if (this.pongTimer) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = null;
+    }
+  }
+
+  sendWebSocketMessage(message) {
+    if (!this.connected || !this.ws) {
+      throw new Error('Not connected');
+    }
+
+    this.ws.send(JSON.stringify(message));
+  }
+
+  sendL2BookSubscription(coin) {
+    this.sendWebSocketMessage({
+      method: 'subscribe',
+      subscription: {
+        type: 'l2Book',
+        coin
+      }
+    });
+  }
+
+  sendL2BookUnsubscription(coin) {
+    this.sendWebSocketMessage({
+      method: 'unsubscribe',
+      subscription: {
+        type: 'l2Book',
+        coin
+      }
+    });
+  }
+
+  buildL2BookPayload(coin, options = {}) {
+    const normalizedOptions = typeof options === 'number' ? { nSigFigs: options } : options;
+    const { nSigFigs = 5, mantissa } = normalizedOptions;
+    const payload = {
+      type: 'l2Book',
+      coin
+    };
+
+    if (nSigFigs !== null && nSigFigs !== undefined) {
+      payload.nSigFigs = nSigFigs;
+    }
+
+    if (mantissa !== null && mantissa !== undefined) {
+      if (nSigFigs !== 5) {
+        throw new Error('l2Book mantissa is only valid when nSigFigs is 5');
+      }
+      if (![1, 2, 5].includes(mantissa)) {
+        throw new Error('l2Book mantissa must be one of 1, 2, or 5');
+      }
+      payload.mantissa = mantissa;
+    }
+
+    return payload;
+  }
+
+  async infoRequest(payload, weight = 2) {
+    await this.restRateLimiter.waitForSlot(weight);
+
+    const response = await this.fetch(this.restUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const errorText = typeof response.text === 'function' ? await response.text() : response.statusText;
+      throw new Error(`HTTP ${response.status}: ${errorText || response.statusText}`);
+    }
+
+    return await response.json();
+  }
+
   /**
    * Handle WebSocket messages
    */
@@ -181,6 +257,11 @@ class HyperliquidConnector extends EventEmitter {
       // Handle subscription responses
       if (message.channel === 'subscriptionResponse') {
         console.log('[Hyperliquid] Subscription confirmed:', message.data);
+        return;
+      }
+
+      if (message.channel === 'pong') {
+        this.handlePong();
         return;
       }
 
@@ -279,11 +360,15 @@ class HyperliquidConnector extends EventEmitter {
     if (!orderbook) {
       return null;
     }
+    const bid = orderbook.bestBid?.price || null;
+    const ask = orderbook.bestAsk?.price || null;
+    const mid = bid && ask ? (bid + ask) / 2 : null;
 
     return {
       coin,
-      bid: orderbook.bestBid?.price || null,
-      ask: orderbook.bestAsk?.price || null,
+      bid,
+      ask,
+      mid,
       bidSize: orderbook.bestBid?.size || null,
       askSize: orderbook.bestAsk?.size || null,
       timestamp: orderbook.timestamp
@@ -309,6 +394,12 @@ class HyperliquidConnector extends EventEmitter {
       return;
     }
 
+    try {
+      this.sendL2BookSubscription(coin);
+    } catch (error) {
+      console.error(`[Hyperliquid] Failed to subscribe to l2Book for ${coin}:`, error.message);
+    }
+
     // Request initial snapshot via WebSocket
     try {
       await this.requestL2Book(coin);
@@ -332,7 +423,7 @@ class HyperliquidConnector extends EventEmitter {
   /**
    * Request L2 orderbook via WebSocket post
    */
-  async requestL2Book(coin, nSigFigs = 5) {
+  async requestL2Book(coin, options = {}) {
     // Check inflight request limit
     if (this.pendingRequests.size >= this.maxInflightRequests) {
       throw new Error('Too many inflight requests');
@@ -362,12 +453,7 @@ class HyperliquidConnector extends EventEmitter {
         id,
         request: {
           type: 'info',
-          payload: {
-            type: 'l2Book',
-            coin,
-            nSigFigs,
-            mantissa: null
-          }
+          payload: this.buildL2BookPayload(coin, options)
         }
       };
 
@@ -472,117 +558,11 @@ class HyperliquidConnector extends EventEmitter {
   }
 
   /**
-   * Poll orderbook via WebSocket
-   * Uses a shared polling loop for all symbols to respect rate limits
-   */
-  startWebSocketPolling(coin) {
-    // Don't start individual polling loops
-    // Polling is handled by the global polling loop started in subscribeOrderbook
-  }
-
-  /**
-   * Start global polling loop for all subscribed symbols
-   */
-  startGlobalPolling() {
-    if (this.globalPollingTimer) {
-      return; // Already running
-    }
-
-    // Calculate polling interval based on number of subscriptions
-    // Target: ~20 requests/second for safety (1200/minute)
-    const calculateInterval = () => {
-      const numSymbols = this.subscriptions.size;
-      if (numSymbols === 0) return 1000;
-
-      // Aim for ~20 total requests per second
-      // If we have 5 symbols, interval = 5 * 50ms = 250ms per cycle
-      return Math.max(50, numSymbols * 50);
-    };
-
-    let symbolIterator = null;
-
-    this.globalPollingTimer = setInterval(async () => {
-      if (!this.connected || this.useRestFallback) {
-        return;
-      }
-
-      if (this.subscriptions.size === 0) {
-        return;
-      }
-
-      // Create or reset iterator
-      if (!symbolIterator || symbolIterator.done) {
-        symbolIterator = this.subscriptions.values();
-      }
-
-      // Get next symbol
-      const next = symbolIterator.next();
-      if (next.done) {
-        symbolIterator = this.subscriptions.values();
-        return;
-      }
-
-      const coin = next.value;
-
-      // Skip if already polling this coin
-      if (this.pollingInProgress.get(coin)) {
-        return;
-      }
-
-      this.pollingInProgress.set(coin, true);
-
-      try {
-        await this.requestL2Book(coin);
-      } catch (error) {
-        // Silently ignore rate limit and inflight errors
-        if (!error.message.includes('Rate limit') &&
-            !error.message.includes('inflight') &&
-            !error.message.includes('timeout')) {
-          console.error(`[Hyperliquid] Error polling orderbook for ${coin}:`, error.message);
-        }
-      } finally {
-        this.pollingInProgress.set(coin, false);
-      }
-    }, 50); // Poll every 50ms, cycling through symbols
-  }
-
-  /**
-   * Stop global polling loop
-   */
-  stopGlobalPolling() {
-    if (this.globalPollingTimer) {
-      clearInterval(this.globalPollingTimer);
-      this.globalPollingTimer = null;
-    }
-  }
-
-  /**
    * Request L2 orderbook via REST API
    */
-  async requestL2BookRest(coin, nSigFigs = 5) {
-    // Wait for rate limit slot (l2Book has weight 2)
-    await this.restRateLimiter.waitForSlot();
-
+  async requestL2BookRest(coin, options = {}) {
     try {
-      const response = await fetch(this.restUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          type: 'l2Book',
-          coin,
-          nSigFigs,
-          mantissa: null
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return data;
+      return await this.infoRequest(this.buildL2BookPayload(coin, options), 2);
     } catch (error) {
       console.error(`[Hyperliquid] REST API error for ${coin}:`, error.message);
       throw error;
@@ -758,9 +738,12 @@ class HyperliquidConnector extends EventEmitter {
 
       // Send ping
       try {
-        this.ws.ping();
+        this.sendWebSocketMessage({ method: 'ping' });
 
         // Set pong timeout
+        if (this.pongTimer) {
+          clearTimeout(this.pongTimer);
+        }
         this.pongTimer = setTimeout(() => {
           console.error('[Hyperliquid] Pong timeout');
           if (this.ws) {
@@ -849,6 +832,14 @@ class HyperliquidConnector extends EventEmitter {
    * Unsubscribe from orderbook updates
    */
   unsubscribe(coin) {
+    if (this.connected && !this.useRestFallback) {
+      try {
+        this.sendL2BookUnsubscription(coin);
+      } catch (error) {
+        console.error(`[Hyperliquid] Failed to unsubscribe from l2Book for ${coin}:`, error.message);
+      }
+    }
+
     this.subscriptions.delete(coin);
     this.orderbooks.delete(coin);
   }
@@ -865,7 +856,6 @@ class HyperliquidConnector extends EventEmitter {
     this.stopRestPolling();
     this.stopPeriodicRestRefresh();
     this.stopStalenessMonitoring();
-    this.stopGlobalPolling();
 
     if (this.ws) {
       this.ws.close();
@@ -876,7 +866,6 @@ class HyperliquidConnector extends EventEmitter {
     this.subscriptions.clear();
     this.orderbooks.clear();
     this.pendingRequests.clear();
-    this.pollingInProgress.clear();
   }
 
   /**
@@ -898,22 +887,7 @@ class HyperliquidConnector extends EventEmitter {
    */
   async getMeta() {
     try {
-      const response = await fetch(this.restUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          type: 'meta'
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return data;
+      return await this.infoRequest({ type: 'meta' }, 20);
     } catch (error) {
       console.error('[Hyperliquid] Error fetching meta:', error.message);
       throw error;
@@ -925,22 +899,7 @@ class HyperliquidConnector extends EventEmitter {
    */
   async getSpotMeta() {
     try {
-      const response = await fetch(this.restUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          type: 'spotMeta'
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return data;
+      return await this.infoRequest({ type: 'spotMeta' }, 20);
     } catch (error) {
       console.error('[Hyperliquid] Error fetching spot meta:', error.message);
       throw error;
@@ -1123,7 +1082,6 @@ class HyperliquidConnector extends EventEmitter {
    * @returns {Promise<Array>} Array of candle objects
    */
   async getCandleSnapshot(coin, interval = '1h', startTime, endTime) {
-    const url = 'https://api.hyperliquid.xyz/info';
     const payload = {
       type: 'candleSnapshot',
       req: {
@@ -1134,17 +1092,7 @@ class HyperliquidConnector extends EventEmitter {
       }
     };
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      throw new Error(`Candle snapshot request failed: ${response.statusText}`);
-    }
-
-    return await response.json();
+    return await this.infoRequest(payload, 20);
   }
 
   /**
@@ -1188,22 +1136,11 @@ class HyperliquidConnector extends EventEmitter {
    * @returns {Promise<Object>} Object with symbol -> mid price mapping
    */
   async getAllMids() {
-    const url = 'https://api.hyperliquid.xyz/info';
     const payload = {
       type: 'allMids'
     };
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch all mids: ${response.statusText}`);
-    }
-
-    return await response.json();
+    return await this.infoRequest(payload, 2);
   }
 
   /**
@@ -1255,6 +1192,33 @@ class HyperliquidConnector extends EventEmitter {
     }
 
     return sizeStr;
+  }
+
+  /**
+   * Convert a non-negative integer to an unsigned 64-bit big-endian byte array.
+   */
+  numberToUint64Bytes(value, label = 'value') {
+    const bigintValue = BigInt(value);
+    const maxUint64 = (1n << 64n) - 1n;
+
+    if (bigintValue < 0n || bigintValue > maxUint64) {
+      throw new Error(`${label} must fit in uint64`);
+    }
+
+    const hex = bigintValue.toString(16).padStart(16, '0');
+    return Array.from(ethers.getBytes(`0x${hex}`));
+  }
+
+  normalizeVaultAddress(vaultAddress) {
+    return ethers.getAddress(vaultAddress);
+  }
+
+  validateCloid(cloid) {
+    if (typeof cloid !== 'string' || !/^0x[0-9a-fA-F]{32}$/.test(cloid)) {
+      throw new Error('cloid must be a 16-byte hex string with 0x prefix');
+    }
+
+    return cloid;
   }
 
   /**
@@ -1321,19 +1285,20 @@ class HyperliquidConnector extends EventEmitter {
     // Add action bytes
     dataToHash.push(...actionBytes);
 
-    // Add nonce as bytes
-    const nonceHex = nonce.toString(16).padStart(16, '0');
-    const nonceBytes = ethers.getBytes('0x' + nonceHex);
-    dataToHash.push(...nonceBytes);
+    // Add nonce as uint64 big-endian bytes
+    dataToHash.push(...this.numberToUint64Bytes(nonce, 'nonce'));
 
-    // Add vault address indicator (1 if vault, 0 if not)
-    dataToHash.push(vaultAddress ? 1 : 0);
+    if (vaultAddress) {
+      dataToHash.push(1);
+      dataToHash.push(...ethers.getBytes(this.normalizeVaultAddress(vaultAddress)));
+    } else {
+      dataToHash.push(0);
+    }
 
-    // Add optional expiration
-    if (expiresAfter) {
-      const expiryHex = expiresAfter.toString(16).padStart(16, '0');
-      const expiryBytes = ethers.getBytes('0x' + expiryHex);
-      dataToHash.push(...expiryBytes);
+    // Add optional expiration separator and uint64 big-endian bytes
+    if (expiresAfter !== null && expiresAfter !== undefined) {
+      dataToHash.push(0);
+      dataToHash.push(...this.numberToUint64Bytes(expiresAfter, 'expiresAfter'));
     }
 
     // Hash the combined data
@@ -1366,7 +1331,7 @@ class HyperliquidConnector extends EventEmitter {
     const orderbookCoin = this.getCoinForOrderbook(coin, assetId);
 
     const isBuy = side === 'buy';
-    const reduceOnly = options.reduceOnly || false;
+    const reduceOnly = isSpot ? false : (options.reduceOnly || false);
     const slippage = options.slippage !== undefined ? options.slippage : 0.05; // Default 5% slippage
 
     let midPrice;
@@ -1436,7 +1401,7 @@ class HyperliquidConnector extends EventEmitter {
     };
 
     if (options.cloid) {
-      order.c = options.cloid;
+      order.c = this.validateCloid(options.cloid);
     }
 
     const action = {
@@ -1451,21 +1416,21 @@ class HyperliquidConnector extends EventEmitter {
 
     // Try WebSocket first if connected, otherwise use REST
     if (this.connected && !options.useRest) {
-      return await this.createOrderWebSocket(action, nonce, options.vaultAddress);
+      return await this.createOrderWebSocket(action, nonce, options.vaultAddress, options.expiresAfter);
     } else {
-      return await this.createOrderRest(action, nonce, options.vaultAddress);
+      return await this.createOrderRest(action, nonce, options.vaultAddress, options.expiresAfter);
     }
   }
 
   /**
    * Create order via WebSocket
    */
-  async createOrderWebSocket(action, nonce, vaultAddress = null) {
+  async createOrderWebSocket(action, nonce, vaultAddress = null, expiresAfter = null) {
     if (!this.connected) {
       throw new Error('Not connected to WebSocket');
     }
 
-    const signature = await this.signAction(action, nonce, vaultAddress);
+    const signature = await this.signAction(action, nonce, vaultAddress, expiresAfter);
 
     const payload = {
       action,
@@ -1474,7 +1439,11 @@ class HyperliquidConnector extends EventEmitter {
     };
 
     if (vaultAddress) {
-      payload.vaultAddress = vaultAddress;
+      payload.vaultAddress = this.normalizeVaultAddress(vaultAddress);
+    }
+
+    if (expiresAfter !== null && expiresAfter !== undefined) {
+      payload.expiresAfter = expiresAfter;
     }
 
     return new Promise((resolve, reject) => {
@@ -1520,8 +1489,8 @@ class HyperliquidConnector extends EventEmitter {
   /**
    * Create order via REST API
    */
-  async createOrderRest(action, nonce, vaultAddress = null) {
-    const signature = await this.signAction(action, nonce, vaultAddress);
+  async createOrderRest(action, nonce, vaultAddress = null, expiresAfter = null) {
+    const signature = await this.signAction(action, nonce, vaultAddress, expiresAfter);
 
     const payload = {
       action,
@@ -1530,11 +1499,15 @@ class HyperliquidConnector extends EventEmitter {
     };
 
     if (vaultAddress) {
-      payload.vaultAddress = vaultAddress;
+      payload.vaultAddress = this.normalizeVaultAddress(vaultAddress);
+    }
+
+    if (expiresAfter !== null && expiresAfter !== undefined) {
+      payload.expiresAfter = expiresAfter;
     }
 
     try {
-      const response = await fetch(this.exchangeUrl, {
+      const response = await this.fetch(this.exchangeUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -1581,22 +1554,10 @@ class HyperliquidConnector extends EventEmitter {
     }
 
     try {
-      const response = await fetch(this.restUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          type: 'clearinghouseState',
-          user: user
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const data = await this.infoRequest({
+        type: 'clearinghouseState',
+        user: user
+      }, 2);
 
       // Parse and return balance information
       const marginSummary = data.marginSummary || {};
@@ -1668,19 +1629,7 @@ class HyperliquidConnector extends EventEmitter {
         requestBody.startTime = startTime;
       }
 
-      const response = await fetch(this.restUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const data = await this.infoRequest(requestBody, 20);
 
       // Data format: array of payment objects
       // Each payment: { time, hash, delta: { type: "funding", coin, fundingRate, szi, usdc, nSamples } }

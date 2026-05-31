@@ -22,6 +22,7 @@
     },
     "balanceUtilizationPercent": 95,
     "maxSlippagePercent": 5.0,
+    "takerFeeRate": 0,
     "maxRetries": 3,
     "orderWaitTime": 10000
   },
@@ -54,6 +55,12 @@
     "maxPerpSpotSpreadPercent": 0.5,
     "minFundingRatePercent": 5,
     "notes": "Liquidity thresholds: $75M minimum 24H combined volume, 0.15% maximum bid-ask spread, 0.5% maximum PERP-SPOT spread, 5% minimum funding APY (filters negative and low funding)"
+  },
+  "risk": {
+    "minFillRatio": 0.999,
+    "maxOpenHedgeMismatchPercent": 2,
+    "maxHedgeMismatchPercent": 30,
+    "notes": "Managed spot symbols default to trading.pairs mapped to SPOT symbols. Set managedSpotSymbols only to override that default."
   },
   "notes": {
     "description": "Trading configuration for Hyperliquid spot and perp markets",

@@ -1,3 +1,5 @@
+import { requireLiveTradingTest } from '../utils/live-guard.js';
+requireLiveTradingTest('tests/set-leverage.js');
 import HyperliquidConnector from '../hyperliquid.js';
 import { setLeverageTo1xForAll, getLeverageSettings, formatLeverageSettings } from '../utils/leverage.js';
 import fs from 'fs';

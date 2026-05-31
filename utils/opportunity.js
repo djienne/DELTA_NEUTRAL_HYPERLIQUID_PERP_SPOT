@@ -3,6 +3,7 @@ import { getBidAskSpreads, filterBySpread } from './spread.js';
 import { getPerpSpotSpreads, filterByPerpSpotSpread } from './arbitrage.js';
 import { get24HourVolumes, convertVolumesToUSDC, filterByVolumeUSDC } from './volume.js';
 import { getFundingRatesWithHistory, sortByAnnualizedRate, getPredictedFundingRates } from './funding.js';
+import { getMaxBidAskSpreadPercent } from './risk.js';
 
 /**
  * Opportunity Selection Utilities
@@ -65,11 +66,11 @@ export async function getMarketData(hyperliquid, symbols, config, options = {}) 
  */
 export function filterOpportunities(marketData, thresholds) {
   const {
-    maxBidAskSpreadPercent = 0.15,
     maxPerpSpotSpreadPercent = 0.5,
     minVolumeUSDC = 75000000,
     minFundingRatePercent = 5
   } = thresholds;
+  const maxBidAskSpreadPercent = getMaxBidAskSpreadPercent(thresholds);
 
   // Create maps for easy lookup
   // For bidAskSpreads, group perp and spot together by PERP symbol

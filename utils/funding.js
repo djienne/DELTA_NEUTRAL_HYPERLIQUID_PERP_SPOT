@@ -29,21 +29,9 @@ export async function getAllFundingRates(hyperliquid, options = {}) {
     }
 
     // Fetch meta and asset context which includes funding rates
-    const response = await fetch(hyperliquid.restUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        type: 'metaAndAssetCtxs'
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
+    const data = await hyperliquid.infoRequest({
+      type: 'metaAndAssetCtxs'
+    }, 20);
 
     // Extract funding rates from the response
     // The structure is: data = [meta, assetCtxs]
@@ -205,23 +193,11 @@ export async function getFundingHistory(hyperliquid, coin, days = 7, options = {
       console.log(`Fetching ${days}-day funding history for ${coin}...`);
     }
 
-    const response = await fetch(hyperliquid.restUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        type: 'fundingHistory',
-        coin: coin,
-        startTime: startTime
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
+    const data = await hyperliquid.infoRequest({
+      type: 'fundingHistory',
+      coin: coin,
+      startTime: startTime
+    }, 20);
 
     if (verbose) {
       console.log(`✅ Fetched ${data.length} funding rate entries for ${coin}`);
@@ -300,21 +276,9 @@ export async function getPredictedFundingRates(hyperliquid, options = {}) {
     }
 
     // Fetch predicted fundings
-    const response = await fetch(hyperliquid.restUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        type: 'predictedFundings'
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
+    const data = await hyperliquid.infoRequest({
+      type: 'predictedFundings'
+    }, 20);
 
     // Extract predicted funding rates from the response
     // The structure is: data = [[coin, [[exchange, {fundingRate, nextFundingTime}], ...]], ...]

@@ -21,23 +21,15 @@ export async function getBalances(hyperliquid, user = null) {
 
   // Fetch both clearinghouse states in parallel
   const [perpState, spotState] = await Promise.all([
-    fetch(hyperliquid.restUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: 'clearinghouseState',
-        user: user
-      })
-    }).then(r => r.json()),
+    hyperliquid.infoRequest({
+      type: 'clearinghouseState',
+      user: user
+    }, 2),
 
-    fetch(hyperliquid.restUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: 'spotClearinghouseState',
-        user: user
-      })
-    }).then(r => r.json())
+    hyperliquid.infoRequest({
+      type: 'spotClearinghouseState',
+      user: user
+    }, 2)
   ]);
 
   // PERP balance (withdrawable)

@@ -36,22 +36,10 @@ export async function getPerpPositions(hyperliquid, user = null, options = {}) {
       console.log(`Fetching PERP positions for ${user}...`);
     }
 
-    const response = await fetch(hyperliquid.restUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        type: 'clearinghouseState',
-        user: user
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
+    const data = await hyperliquid.infoRequest({
+      type: 'clearinghouseState',
+      user: user
+    }, 2);
 
     // Get asset metadata to map positions to symbols
     const meta = await hyperliquid.getMeta();
@@ -126,7 +114,8 @@ export async function getPerpPositions(hyperliquid, user = null, options = {}) {
  * @returns {Promise<Object[]>} Array of SPOT balance objects
  */
 export async function getSpotBalances(hyperliquid, user = null, options = {}) {
-  const { verbose = false } = options;
+  const { verbose = false, managedSpotSymbols = null } = options;
+  const managedSet = managedSpotSymbols ? new Set(managedSpotSymbols) : null;
 
   try {
     user = user || hyperliquid.wallet;
@@ -139,22 +128,10 @@ export async function getSpotBalances(hyperliquid, user = null, options = {}) {
       console.log(`Fetching SPOT balances for ${user}...`);
     }
 
-    const response = await fetch(hyperliquid.restUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        type: 'spotClearinghouseState',
-        user: user
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
+    const data = await hyperliquid.infoRequest({
+      type: 'spotClearinghouseState',
+      user: user
+    }, 2);
 
     const balances = [];
 
@@ -167,7 +144,7 @@ export async function getSpotBalances(hyperliquid, user = null, options = {}) {
         const available = total - hold;
 
         // Only include non-USDC balances with non-zero amounts
-        if (coin !== 'USDC' && total > 0) {
+        if (coin !== 'USDC' && total > 0 && (!managedSet || managedSet.has(coin))) {
           balances.push({
             symbol: coin,
             total: total,
@@ -222,8 +199,10 @@ export async function getAllPositions(hyperliquid, user = null, options = {}) {
  * @param {Object[]} spotBalances - Array of SPOT balances from getSpotBalances
  * @returns {Object} Delta-neutral analysis
  */
-export function analyzeDeltaNeutral(perpPositions, spotBalances) {
+export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
+  const { maxHedgeMismatchPercent = 30 } = options;
   const deltaNeutralPairs = [];
+  const imbalancedPairs = [];
   const unmatchedPerp = [];
   const unmatchedSpot = [];
 
@@ -274,7 +253,7 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances) {
         }
       }
 
-      deltaNeutralPairs.push({
+      const pair = {
         symbol: symbol,
         perpSide: perpPosition.side,
         perpSize: perpSize,
@@ -286,7 +265,13 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances) {
         hedgeQuality: hedgeQuality,
         perpPosition: perpPosition,
         spotBalance: spotBalance
-      });
+      };
+
+      if (isDeltaNeutral && sizeMismatchPct <= maxHedgeMismatchPercent) {
+        deltaNeutralPairs.push(pair);
+      } else {
+        imbalancedPairs.push(pair);
+      }
 
       // Remove from spotMap so we can track unmatched
       spotMap.delete(symbol);
@@ -306,9 +291,10 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances) {
 
   return {
     deltaNeutralPairs: deltaNeutralPairs,
+    imbalancedPairs: imbalancedPairs,
     unmatchedPerp: unmatchedPerp,
     unmatchedSpot: unmatchedSpot,
-    hasDeltaNeutral: deltaNeutralPairs.some(p => p.isDeltaNeutral),
+    hasDeltaNeutral: deltaNeutralPairs.length > 0,
     perfectHedges: deltaNeutralPairs.filter(p => p.hedgeQuality === 'PERFECT').length,
     goodHedges: deltaNeutralPairs.filter(p => p.hedgeQuality === 'GOOD').length
   };

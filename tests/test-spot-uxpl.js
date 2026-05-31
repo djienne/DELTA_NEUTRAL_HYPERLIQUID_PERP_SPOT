@@ -1,3 +1,5 @@
+import { requireLiveTradingTest } from '../utils/live-guard.js';
+requireLiveTradingTest('tests/test-spot-uxpl.js');
 import HyperliquidConnector from '../hyperliquid.js';
 import dotenv from 'dotenv';
 dotenv.config();

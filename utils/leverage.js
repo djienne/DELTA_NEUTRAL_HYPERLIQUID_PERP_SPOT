@@ -45,7 +45,7 @@ export async function updateLeverage(hyperliquid, coin, leverage, isCross = fals
   const nonce = Date.now();
 
   // Sign action
-  const signature = await hyperliquid.signAction(action, nonce, options.vaultAddress);
+  const signature = await hyperliquid.signAction(action, nonce, options.vaultAddress, options.expiresAfter);
 
   // Create payload
   const payload = {
@@ -55,12 +55,19 @@ export async function updateLeverage(hyperliquid, coin, leverage, isCross = fals
   };
 
   if (options.vaultAddress) {
-    payload.vaultAddress = options.vaultAddress;
+    payload.vaultAddress = typeof hyperliquid.normalizeVaultAddress === 'function'
+      ? hyperliquid.normalizeVaultAddress(options.vaultAddress)
+      : options.vaultAddress;
+  }
+
+  if (options.expiresAfter !== null && options.expiresAfter !== undefined) {
+    payload.expiresAfter = options.expiresAfter;
   }
 
   // Send request
   try {
-    const response = await fetch(hyperliquid.exchangeUrl, {
+    const requestFetch = hyperliquid.fetch || fetch;
+    const response = await requestFetch(hyperliquid.exchangeUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -160,22 +167,10 @@ export async function getLeverageSettings(hyperliquid, user = null) {
   }
 
   // Fetch clearinghouse state
-  const response = await fetch(hyperliquid.restUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      type: 'clearinghouseState',
-      user: user
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-  }
-
-  const data = await response.json();
+  const data = await hyperliquid.infoRequest({
+    type: 'clearinghouseState',
+    user: user
+  }, 2);
 
   // Get meta for symbol mapping
   const meta = await hyperliquid.getMeta();
@@ -189,8 +184,13 @@ export async function getLeverageSettings(hyperliquid, user = null) {
       const assetIndex = asset.coin;
 
       // Get symbol name from meta
-      const assetInfo = meta.universe[assetIndex];
-      const symbol = assetInfo ? assetInfo.name : `Asset${assetIndex}`;
+      let symbol;
+      if (typeof assetIndex === 'string') {
+        symbol = assetIndex;
+      } else {
+        const assetInfo = meta.universe[assetIndex];
+        symbol = assetInfo ? assetInfo.name : `Asset${assetIndex}`;
+      }
 
       // Get leverage info
       const leverage = asset.leverage;

@@ -1,3 +1,5 @@
+import { requireLiveTradingTest } from '../utils/live-guard.js';
+requireLiveTradingTest('tests/emergency-close-fartcoin-imbalance.js');
 #!/usr/bin/env node
 import dotenv from 'dotenv';
 import HyperliquidConnector from '../connectors/hyperliquid.js';

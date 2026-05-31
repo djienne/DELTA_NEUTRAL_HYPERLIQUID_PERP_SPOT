@@ -1,3 +1,5 @@
+import { requireLiveTradingTest } from '../utils/live-guard.js';
+requireLiveTradingTest('tests/emergency-close-hyperliquid.js');
 import dotenv from 'dotenv';
 import { loadConfig } from '../utils/config.js';
 import HyperliquidConnector from '../connectors/hyperliquid.js';

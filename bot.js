@@ -10,7 +10,9 @@ import { getFundingRates, getFundingRatesWithHistory } from './utils/funding.js'
 import { get24HourVolumes, convertVolumesToUSDC } from './utils/volume.js';
 import { getBidAskSpreads } from './utils/spread.js';
 import { getPerpSpotSpreads } from './utils/arbitrage.js';
+import { getManagedSpotSymbols, getMaxHedgeMismatchPercent } from './utils/risk.js';
 import fs from 'fs';
+import { pathToFileURL } from 'url';
 
 /**
  * Delta-Neutral Trading Bot
@@ -84,6 +86,10 @@ let hyperliquid = null;
 let isRunning = false;
 let cycleCount = 0;
 
+function timestamp() {
+  return `[${new Date().toLocaleTimeString()}]`;
+}
+
 /**
  * Initialize bot
  */
@@ -133,19 +139,23 @@ async function initialize() {
  */
 async function verifyPositionOnChain() {
   console.log('[Bot] Verifying position on-chain...');
+  const currentPosition = hasPosition(state) ? getCurrentPosition(state) : null;
+  const managedSpotSymbols = getManagedSpotSymbols(config, currentPosition);
 
   const [perpPositions, spotBalances] = await Promise.all([
     getPerpPositions(hyperliquid, null, { verbose: false }),
-    getSpotBalances(hyperliquid, null, { verbose: false })
+    getSpotBalances(hyperliquid, null, { verbose: false, managedSpotSymbols })
   ]);
 
   if (perpPositions.length === 0 && spotBalances.length === 0) {
     console.log('[Bot] ✅ No positions on-chain');
-    return null;
+    return { status: 'none', pair: null, analysis: null };
   }
 
   // Analyze for delta-neutral
-  const analysis = analyzeDeltaNeutral(perpPositions, spotBalances);
+  const analysis = analyzeDeltaNeutral(perpPositions, spotBalances, {
+    maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
+  });
 
   if (analysis.deltaNeutralPairs.length > 0) {
     const pair = analysis.deltaNeutralPairs[0];
@@ -154,7 +164,7 @@ async function verifyPositionOnChain() {
     console.log(`[Bot]   ${pair.symbol}: ${pair.perpSide} ${pair.perpSize} PERP + ${pair.spotSize} SPOT`);
     console.log(`[Bot]   Hedge Quality: ${pair.hedgeQuality}`);
 
-    return pair;
+    return { status: 'delta_neutral', pair, analysis };
   }
 
   if (perpPositions.length > 0 || spotBalances.length > 0) {
@@ -171,7 +181,7 @@ async function verifyPositionOnChain() {
     }
   }
 
-  return null;
+  return { status: 'imbalanced', pair: null, analysis };
 }
 
 /**
@@ -186,7 +196,9 @@ async function cleanupImbalancedPositions() {
     const results = await autoHedgeAll(hyperliquid, config, {
       verbose: true,
       minValueUSD: 1,
-      fallbackToClose: true
+      fallbackToClose: true,
+      managedSpotSymbols: Array.from(getManagedSpotSymbols(config, hasPosition(state) ? getCurrentPosition(state) : null)),
+      maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
     });
 
     if (results.totalProcessed === 0) {
@@ -218,8 +230,6 @@ async function cleanupImbalancedPositions() {
  */
 async function runCycle() {
   cycleCount++;
-
-  const timestamp = () => `[${new Date().toLocaleTimeString()}]`;
 
   console.log('='.repeat(80));
   console.log(`${timestamp()} Check Cycle #${cycleCount} - ${new Date().toLocaleDateString()}`);
@@ -257,7 +267,7 @@ async function runCycle() {
       // Verify position still exists on-chain
       const onChainPosition = await verifyPositionOnChain();
 
-      if (!onChainPosition) {
+      if (onChainPosition.status === 'none') {
         console.log(`${timestamp()} [Bot] ⚠️  Position in state but not on-chain! Clearing state.`);
         state = closePositionState(state, {
           reason: 'Position not found on-chain',
@@ -266,6 +276,16 @@ async function runCycle() {
           totalPnl: 0
         });
         saveState(state);
+      } else if (onChainPosition.status === 'imbalanced') {
+        console.log(`${timestamp()} [Bot] Managed on-chain exposure is imbalanced. Halting new decisions this cycle.`);
+        await autoHedgeAll(hyperliquid, config, {
+          verbose: true,
+          minValueUSD: 1,
+          fallbackToClose: false,
+          managedSpotSymbols: Array.from(getManagedSpotSymbols(config, position)),
+          maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
+        });
+        return;
       } else {
         // Check if we should close position
         const age = getPositionAge(position);
@@ -359,17 +379,18 @@ async function runCycle() {
 
             // Check if significantly better opportunity exists
             if (analysis.best && analysis.best.symbol !== position.symbol) {
+              const incumbentFundingRate = currentSymbolOpp.primaryFundingRate ?? position.annualizedFunding;
               const isBetter = isSignificantlyBetter(
-                { avgFundingRate: position.annualizedFunding },
+                { avgFundingRate: incumbentFundingRate },
                 { avgFundingRate: analysis.best.primaryFundingRate },  // Use primaryFundingRate for comparison
                 IMPROVEMENT_FACTOR
               );
 
               if (isBetter) {
                 console.log(`${timestamp()} [4/6] ✅ Found significantly better opportunity: ${analysis.best.symbol}`);
-                console.log(`${timestamp()} [4/6]   Current: ${(position.annualizedFunding * 100).toFixed(2)}% APY`);
+                console.log(`${timestamp()} [4/6]   Current: ${(incumbentFundingRate * 100).toFixed(2)}% APY`);
                 console.log(`${timestamp()} [4/6]   New: ${analysis.best.primaryFundingPercent.toFixed(2)}% APY`);
-                console.log(`${timestamp()} [4/6]   Improvement: ${(analysis.best.primaryFundingRate / position.annualizedFunding).toFixed(2)}x`);
+                console.log(`${timestamp()} [4/6]   Improvement: ${(analysis.best.primaryFundingRate / incumbentFundingRate).toFixed(2)}x`);
                 await closeAndReopen(position, 'Switching to better opportunity', analysis.best);
                 return;
               } else {
@@ -398,9 +419,9 @@ async function runCycle() {
       // Verify no position on-chain
       const onChainPosition = await verifyPositionOnChain();
 
-      if (onChainPosition) {
+      if (onChainPosition.status !== 'none') {
         console.log(`${timestamp()} [Bot] ⚠️  Found position on-chain but not in state!`);
-        console.log(`${timestamp()} [Bot]    This might be from a previous run. Please close manually or wait for next cycle.`);
+        console.log(`${timestamp()} [Bot]    Status: ${onChainPosition.status}. Please close manually or wait for next cycle.`);
         // Don't open new position if there's one on-chain
         return;
       }
@@ -528,9 +549,11 @@ async function closeAndReopen(currentPosition, reason, newOpportunity) {
       }
     } else {
       console.error('❌ Failed to close position');
+      throw new Error('Failed to close position');
     }
   } catch (error) {
     console.error('❌ Error closing position:', error.message);
+    throw error;
   }
 }
 
@@ -680,11 +703,13 @@ async function displayStatus() {
     try {
       // Subscribe to orderbooks for all pairs (both PERP and SPOT)
       const subscribePromises = [];
+      const spotOrderbookCoins = new Map();
       for (const symbol of config.trading.pairs) {
         subscribePromises.push(hyperliquid.subscribeOrderbook(symbol)); // PERP
         const spotSymbol = HyperliquidConnector.perpToSpot(symbol);
         const spotAssetId = await hyperliquid.getAssetId(spotSymbol, true);
         const spotCoin = hyperliquid.getCoinForOrderbook(spotSymbol, spotAssetId);
+        spotOrderbookCoins.set(symbol, spotCoin);
         subscribePromises.push(hyperliquid.subscribeOrderbook(spotCoin)); // SPOT
       }
       await Promise.all(subscribePromises);
@@ -701,8 +726,7 @@ async function displayStatus() {
         validDataCount = 0;
         for (const symbol of config.trading.pairs) {
           const perpBidAsk = hyperliquid.getBidAsk(symbol);
-          const spotSymbol = HyperliquidConnector.perpToSpot(symbol);
-          const spotBidAsk = hyperliquid.getBidAsk(spotSymbol, true);
+          const spotBidAsk = hyperliquid.getBidAsk(spotOrderbookCoins.get(symbol));
 
           // Check if we have valid bid/ask/mid data
           if (perpBidAsk?.bid && perpBidAsk?.ask && perpBidAsk?.mid && perpBidAsk.mid > 0 &&
@@ -725,7 +749,7 @@ async function displayStatus() {
       for (const symbol of config.trading.pairs) {
         const perpBidAsk = hyperliquid.getBidAsk(symbol);
         const spotSymbol = HyperliquidConnector.perpToSpot(symbol);
-        const spotBidAsk = hyperliquid.getBidAsk(spotSymbol, true);
+        const spotBidAsk = hyperliquid.getBidAsk(spotOrderbookCoins.get(symbol));
 
         if (perpBidAsk && spotBidAsk) {
           let perpSpread = null;
@@ -913,7 +937,7 @@ async function run() {
 /**
  * Graceful shutdown
  */
-async function shutdown() {
+async function shutdown(exitCode = 0) {
   console.log();
   console.log('[Bot] Shutting down...');
 
@@ -927,26 +951,30 @@ async function shutdown() {
   }
 
   console.log('[Bot] Shutdown complete');
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 // Handle shutdown signals
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => { void shutdown(0); });
+process.on('SIGTERM', () => { void shutdown(0); });
 
 // Handle uncaught errors
 process.on('uncaughtException', (error) => {
   console.error('[Bot] Uncaught exception:', error);
-  shutdown();
+  void shutdown(1);
 });
 
 process.on('unhandledRejection', (error) => {
   console.error('[Bot] Unhandled rejection:', error);
-  shutdown();
+  void shutdown(1);
 });
 
 // Start bot
-run().catch(error => {
-  console.error('[Bot] Fatal error:', error);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  run().catch(error => {
+    console.error('[Bot] Fatal error:', error);
+    process.exit(1);
+  });
+}
+
+export { timestamp, verifyPositionOnChain, runCycle, closeAndReopen, displayStatus };
