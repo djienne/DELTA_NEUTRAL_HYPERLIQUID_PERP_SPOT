@@ -8,7 +8,11 @@ import path from 'path';
  * Tracks open positions, entry times, and position metadata.
  */
 
-const STATE_FILE = './bot-state.json';
+const DEFAULT_STATE_FILE = './bot-state.json';
+
+export function getStateFilePath() {
+  return process.env.BOT_STATE_FILE || DEFAULT_STATE_FILE;
+}
 
 /**
  * Default state structure
@@ -62,8 +66,9 @@ function compactPositionData(positionData) {
  */
 export function loadState() {
   try {
-    if (fs.existsSync(STATE_FILE)) {
-      const data = fs.readFileSync(STATE_FILE, 'utf8');
+    const stateFile = getStateFilePath();
+    if (fs.existsSync(stateFile)) {
+      const data = fs.readFileSync(stateFile, 'utf8');
       const state = JSON.parse(data);
 
       // Ensure all required fields exist (handle old versions)
@@ -86,7 +91,14 @@ export function loadState() {
  */
 export function saveState(state) {
   try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+    const stateFile = getStateFilePath();
+    const stateDir = path.dirname(stateFile);
+
+    if (stateDir && stateDir !== '.') {
+      fs.mkdirSync(stateDir, { recursive: true });
+    }
+
+    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf8');
   } catch (error) {
     console.error('[State] Error saving state:', error.message);
     throw error;

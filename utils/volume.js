@@ -6,19 +6,19 @@ import HyperliquidConnector from '../hyperliquid.js';
 
 /**
  * Helper function to limit concurrent requests
- * @param {Array<Promise>} promises - Array of promise-returning functions
+ * @param {Array<Function>} tasks - Array of promise-returning functions
  * @param {number} limit - Maximum number of concurrent requests
  * @param {number} delayBetweenBatches - Delay in ms between batches
  * @returns {Promise<Array>} Results array
  */
-async function fetchWithConcurrencyLimit(promises, limit = 3, delayBetweenBatches = 200) {
+export async function fetchWithConcurrencyLimit(tasks, limit = 3, delayBetweenBatches = 200) {
   const results = [];
-  for (let i = 0; i < promises.length; i += limit) {
-    const batch = promises.slice(i, i + limit);
-    const batchResults = await Promise.all(batch);
+  for (let i = 0; i < tasks.length; i += limit) {
+    const batch = tasks.slice(i, i + limit);
+    const batchResults = await Promise.all(batch.map(task => task()));
     results.push(...batchResults);
     // Small delay between batches to respect rate limits
-    if (i + limit < promises.length) {
+    if (i + limit < tasks.length) {
       await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
     }
   }
@@ -50,7 +50,7 @@ export async function get24HourVolumes(hyperliquid, perpSymbols, options = {}) {
   const finalDelay = delayBetweenBatches ?? rateLimitConfig.delayBetweenBatches ?? 200;
 
   // Create all fetch promises
-  const fetchPromises = perpSymbols.map(async (perpSymbol) => {
+  const fetchTasks = perpSymbols.map((perpSymbol) => async () => {
     const spotSymbol = HyperliquidConnector.perpToSpot(perpSymbol);
 
     if (verbose) {
@@ -93,7 +93,7 @@ export async function get24HourVolumes(hyperliquid, perpSymbols, options = {}) {
   });
 
   // Execute with concurrency limit
-  return await fetchWithConcurrencyLimit(fetchPromises, finalConcurrency, finalDelay);
+  return await fetchWithConcurrencyLimit(fetchTasks, finalConcurrency, finalDelay);
 }
 
 /**

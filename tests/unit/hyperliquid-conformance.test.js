@@ -222,3 +222,18 @@ test('order helpers validate cloid and forward expiresAfter', async () => {
   assert.equal(payloads[0].expiresAfter, 456);
   assert.equal(payloads[0].vaultAddress, ethers.getAddress(vaultAddress));
 });
+
+test('nextNonce is strictly monotonic within the same millisecond', () => {
+  const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
+  const originalNow = Date.now;
+  Date.now = () => 1234567890;
+
+  try {
+    assert.deepEqual(
+      [connector.nextNonce(), connector.nextNonce(), connector.nextNonce()],
+      [1234567890, 1234567891, 1234567892]
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});

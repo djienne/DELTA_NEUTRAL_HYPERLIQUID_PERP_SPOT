@@ -6,6 +6,7 @@ node_modules/
 
 # Runtime state
 bot-state.json
+data/
 
 # Data files
 *.csv

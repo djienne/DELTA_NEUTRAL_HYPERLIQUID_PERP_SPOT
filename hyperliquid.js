@@ -70,6 +70,7 @@ class HyperliquidConnector extends EventEmitter {
     // Request tracking
     this.requestId = 0;
     this.pendingRequests = new Map();
+    this.lastNonce = options.lastNonce || 0;
 
     // Subscriptions
     this.subscriptions = new Set();
@@ -91,6 +92,12 @@ class HyperliquidConnector extends EventEmitter {
 
     // Track inflight WebSocket requests
     this.maxInflightRequests = options.maxInflightRequests || 90; // Max 100, use 90 for buffer
+  }
+
+  nextNonce() {
+    const now = Date.now();
+    this.lastNonce = Math.max(now, this.lastNonce + 1);
+    return this.lastNonce;
   }
 
   /**
@@ -1412,7 +1419,7 @@ class HyperliquidConnector extends EventEmitter {
 
     console.log(`[Hyperliquid] Order object:`, JSON.stringify(order, null, 2));
 
-    const nonce = Date.now();
+    const nonce = this.nextNonce();
 
     // Try WebSocket first if connected, otherwise use REST
     if (this.connected && !options.useRest) {

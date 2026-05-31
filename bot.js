@@ -5,12 +5,12 @@ import { findBestOpportunities, isSignificantlyBetter } from './utils/opportunit
 import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral } from './utils/positions.js';
 import { openDeltaNeutralPosition, closeDeltaNeutralPosition } from './utils/trade.js';
 import { logStatistics } from './utils/statistics.js';
-import { autoHedgeAll } from './utils/hedge.js';
-import { getFundingRates, getFundingRatesWithHistory } from './utils/funding.js';
+import { autoHedgeAll, analyzeHedgeNeeds, formatHedgeReport } from './utils/hedge.js';
+import { getFundingRates } from './utils/funding.js';
 import { get24HourVolumes, convertVolumesToUSDC } from './utils/volume.js';
-import { getBidAskSpreads } from './utils/spread.js';
 import { getPerpSpotSpreads } from './utils/arbitrage.js';
-import { getManagedSpotSymbols, getMaxHedgeMismatchPercent } from './utils/risk.js';
+import { getManagedSpotSymbols, getMaxHedgeMismatchPercent, getStartupCleanupMode } from './utils/risk.js';
+import { getCurrentPositionFundingSignal, getPositiveReopenOpportunity, isNegativeFundingSignal } from './utils/position-decision.js';
 import fs from 'fs';
 import { pathToFileURL } from 'url';
 
@@ -88,6 +88,33 @@ let cycleCount = 0;
 
 function timestamp() {
   return `[${new Date().toLocaleTimeString()}]`;
+}
+
+function bidAskFromL2Book(coin, l2Book) {
+  const [bids, asks] = l2Book?.levels || [];
+  const bestBid = bids?.[0];
+  const bestAsk = asks?.[0];
+
+  if (!bestBid || !bestAsk) {
+    return null;
+  }
+
+  const bid = parseFloat(bestBid.px);
+  const ask = parseFloat(bestAsk.px);
+
+  if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) {
+    return null;
+  }
+
+  return {
+    coin,
+    bid,
+    ask,
+    mid: (bid + ask) / 2,
+    bidSize: parseFloat(bestBid.sz || '0'),
+    askSize: parseFloat(bestAsk.sz || '0'),
+    timestamp: l2Book.time || Date.now()
+  };
 }
 
 /**
@@ -193,12 +220,35 @@ async function cleanupImbalancedPositions() {
   console.log();
 
   try {
+    const startupCleanupMode = getStartupCleanupMode(config);
+    const managedSpotSymbols = Array.from(getManagedSpotSymbols(config, hasPosition(state) ? getCurrentPosition(state) : null));
+    const maxHedgeMismatchPercent = getMaxHedgeMismatchPercent(config);
+
+    if (startupCleanupMode === 'report-only') {
+      const analysis = await analyzeHedgeNeeds(hyperliquid, {
+        verbose: false,
+        minValueUSD: 1,
+        managedSpotSymbols,
+        maxHedgeMismatchPercent
+      });
+
+      console.log('[Bot] Startup cleanup mode: report-only');
+      console.log(formatHedgeReport(analysis));
+      return;
+    }
+
+    if (startupCleanupMode === 'hedge-only') {
+      console.log('[Bot] Startup cleanup mode: hedge-only (will not close positions if hedging fails)');
+    } else {
+      console.log('[Bot] Startup cleanup mode: hedge-or-close (may close positions if hedging fails)');
+    }
+
     const results = await autoHedgeAll(hyperliquid, config, {
       verbose: true,
       minValueUSD: 1,
-      fallbackToClose: true,
-      managedSpotSymbols: Array.from(getManagedSpotSymbols(config, hasPosition(state) ? getCurrentPosition(state) : null)),
-      maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
+      fallbackToClose: startupCleanupMode === 'hedge-or-close',
+      managedSpotSymbols,
+      maxHedgeMismatchPercent
     });
 
     if (results.totalProcessed === 0) {
@@ -295,13 +345,38 @@ async function runCycle() {
         console.log(`${timestamp()} [2/6] Can Close: ${canClose ? 'YES' : 'NO'} (min hold: ${MIN_HOLD_TIME_MS / (1000 * 60 * 60 * 24)} days)`);
         console.log();
 
+        // Always check current funding. Negative funding is an emergency exit and
+        // must not wait for the normal rebalancing hold window.
+        console.log(`${timestamp()} [3/6] Checking current opportunities...`);
+        const analysis = await findBestOpportunities(hyperliquid, config.trading.pairs, config, { verbose: true });
+        console.log();
+        console.log(analysis.report);
+        console.log();
+
+        const fundingSignal = getCurrentPositionFundingSignal(position, analysis);
+        if (fundingSignal.available) {
+          console.log(`${timestamp()} [4/6] Current position ${position.symbol} funding: ${fundingSignal.fundingPercent.toFixed(2)}% APY (${fundingSignal.fundingType})`);
+        } else {
+          console.log(`${timestamp()} [4/6] ${fundingSignal.reason}`);
+        }
+
+        if (isNegativeFundingSignal(fundingSignal)) {
+          console.log(`${timestamp()} [4/6] âŒ Funding turned negative! Closing position immediately...`);
+
+          const newOpportunity = getPositiveReopenOpportunity(analysis);
+
+          if (newOpportunity) {
+            console.log(`${timestamp()} [4/6] âœ… Found positive opportunity: ${newOpportunity.symbol} (${newOpportunity.primaryFundingPercent.toFixed(2)}% APY)`);
+          } else {
+            console.log(`${timestamp()} [4/6] âš ï¸  No positive funding opportunities available. Will close without reopening.`);
+          }
+
+          await closeAndReopen(position, 'Funding turned negative', newOpportunity);
+          return;
+        }
+
         if (canClose) {
-          // Check current funding rate
-          console.log(`${timestamp()} [3/6] Checking current opportunities...`);
-          const analysis = await findBestOpportunities(hyperliquid, config.trading.pairs, config, { verbose: true });
-          console.log();
-          console.log(analysis.report);
-          console.log();
+          console.log(`${timestamp()} [3/6] Position can rebalance; evaluating non-emergency changes...`);
 
           // Find current position's funding
           const currentSymbolOpp = analysis.rankedOpportunities.find(o => o.symbol === position.symbol);
@@ -401,7 +476,7 @@ async function runCycle() {
 
           console.log(`${timestamp()} [5/6] Holding current position`);
         } else {
-          console.log(`${timestamp()} [3/6] Position within minimum hold time, skipping opportunity check`);
+          console.log(`${timestamp()} [3/6] Position within minimum hold time, skipping non-emergency rebalancing`);
         }
 
         // Update check time
@@ -698,96 +773,42 @@ async function displayStatus() {
       }
     );
 
-    // Fetch bid-ask spreads via WebSocket subscription (avoids REST API rate limits)
+    // Fetch bid-ask spreads with REST snapshots so status display does not mutate
+    // the trading connector's shared WebSocket subscriptions/orderbook cache.
     const bidAskSpreads = [];
     try {
-      // Subscribe to orderbooks for all pairs (both PERP and SPOT)
-      const subscribePromises = [];
-      const spotOrderbookCoins = new Map();
       for (const symbol of config.trading.pairs) {
-        subscribePromises.push(hyperliquid.subscribeOrderbook(symbol)); // PERP
         const spotSymbol = HyperliquidConnector.perpToSpot(symbol);
         const spotAssetId = await hyperliquid.getAssetId(spotSymbol, true);
         const spotCoin = hyperliquid.getCoinForOrderbook(spotSymbol, spotAssetId);
-        spotOrderbookCoins.set(symbol, spotCoin);
-        subscribePromises.push(hyperliquid.subscribeOrderbook(spotCoin)); // SPOT
-      }
-      await Promise.all(subscribePromises);
 
-      // Wait for orderbook data to arrive and validate we have valid data
-      const maxRetries = 5;
-      const retryDelay = 500; // ms
-      let validDataCount = 0;
+        const [perpBook, spotBook] = await Promise.all([
+          hyperliquid.requestL2BookRest(symbol),
+          hyperliquid.requestL2BookRest(spotCoin)
+        ]);
 
-      for (let retry = 0; retry < maxRetries; retry++) {
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        const perpBidAsk = bidAskFromL2Book(symbol, perpBook);
+        const spotBidAsk = bidAskFromL2Book(spotCoin, spotBook);
 
-        // Check how many symbols have valid orderbook data
-        validDataCount = 0;
-        for (const symbol of config.trading.pairs) {
-          const perpBidAsk = hyperliquid.getBidAsk(symbol);
-          const spotBidAsk = hyperliquid.getBidAsk(spotOrderbookCoins.get(symbol));
-
-          // Check if we have valid bid/ask/mid data
-          if (perpBidAsk?.bid && perpBidAsk?.ask && perpBidAsk?.mid && perpBidAsk.mid > 0 &&
-              spotBidAsk?.bid && spotBidAsk?.ask && spotBidAsk?.mid && spotBidAsk.mid > 0) {
-            validDataCount++;
-          }
+        if (!perpBidAsk || !spotBidAsk) {
+          continue;
         }
 
-        // If we have valid data for most symbols (at least 75%), we're good
-        if (validDataCount >= config.trading.pairs.length * 0.75) {
-          break;
-        }
-      }
+        let perpSpread = ((perpBidAsk.ask - perpBidAsk.bid) / perpBidAsk.mid) * 100;
+        let spotSpread = ((spotBidAsk.ask - spotBidAsk.bid) / spotBidAsk.mid) * 100;
 
-      if (validDataCount === 0) {
-        throw new Error('No valid orderbook data received after retries');
-      }
+        if (!Number.isFinite(perpSpread)) perpSpread = null;
+        if (!Number.isFinite(spotSpread)) spotSpread = null;
 
-      // Get spreads from cached orderbook data
-      for (const symbol of config.trading.pairs) {
-        const perpBidAsk = hyperliquid.getBidAsk(symbol);
-        const spotSymbol = HyperliquidConnector.perpToSpot(symbol);
-        const spotBidAsk = hyperliquid.getBidAsk(spotOrderbookCoins.get(symbol));
-
-        if (perpBidAsk && spotBidAsk) {
-          let perpSpread = null;
-          let spotSpread = null;
-
-          // Calculate PERP spread with validation
-          if (perpBidAsk.ask && perpBidAsk.bid && perpBidAsk.mid && perpBidAsk.mid > 0) {
-            perpSpread = ((perpBidAsk.ask - perpBidAsk.bid) / perpBidAsk.mid) * 100;
-            // Validate result is a valid number
-            if (!isFinite(perpSpread)) perpSpread = null;
-          }
-
-          // Calculate SPOT spread with validation
-          if (spotBidAsk.ask && spotBidAsk.bid && spotBidAsk.mid && spotBidAsk.mid > 0) {
-            spotSpread = ((spotBidAsk.ask - spotBidAsk.bid) / spotBidAsk.mid) * 100;
-            // Validate result is a valid number
-            if (!isFinite(spotSpread)) spotSpread = null;
-          }
-
-          bidAskSpreads.push({
-            perpSymbol: symbol,
-            spotSymbol: spotSymbol,
-            perpSpreadPercent: perpSpread,
-            spotSpreadPercent: spotSpread
-          });
-        }
-      }
-
-      // Unsubscribe to clean up
-      for (const symbol of config.trading.pairs) {
-        hyperliquid.unsubscribe(symbol); // PERP
-        const spotSymbol = HyperliquidConnector.perpToSpot(symbol);
-        const spotAssetId = await hyperliquid.getAssetId(spotSymbol, true);
-        const spotCoin = hyperliquid.getCoinForOrderbook(spotSymbol, spotAssetId);
-        hyperliquid.unsubscribe(spotCoin); // SPOT
+        bidAskSpreads.push({
+          perpSymbol: symbol,
+          spotSymbol,
+          perpSpreadPercent: perpSpread,
+          spotSpreadPercent: spotSpread
+        });
       }
     } catch (error) {
-      // If WebSocket fails, just show --- (no spreads)
+      // If snapshot fetching fails, just show --- (no spreads)
       console.error(colors.dim + `[Status] Could not fetch bid-ask spreads: ${error.message}` + colors.reset);
     }
 

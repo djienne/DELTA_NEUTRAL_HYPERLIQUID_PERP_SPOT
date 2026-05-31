@@ -1,9 +1,13 @@
 import HyperliquidConnector from '../hyperliquid.js';
-import { getBidAskSpreads, filterBySpread } from './spread.js';
-import { getPerpSpotSpreads, filterByPerpSpotSpread } from './arbitrage.js';
-import { get24HourVolumes, convertVolumesToUSDC, filterByVolumeUSDC } from './volume.js';
-import { getFundingRatesWithHistory, sortByAnnualizedRate, getPredictedFundingRates } from './funding.js';
+import { getBidAskSpreads } from './spread.js';
+import { getPerpSpotSpreads } from './arbitrage.js';
+import { get24HourVolumes, convertVolumesToUSDC } from './volume.js';
+import { getFundingRatesWithHistory, getPredictedFundingRates } from './funding.js';
 import { getMaxBidAskSpreadPercent } from './risk.js';
+
+function isFiniteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
 
 /**
  * Opportunity Selection Utilities
@@ -84,11 +88,15 @@ export function filterOpportunities(marketData, thresholds) {
         perpSpreadPercent: null,
         spotSpreadPercent: null,
         perpMid: null,
-        spotMid: null
+        spotMid: null,
+        errors: []
       });
     }
 
     const entry = bidAskMap.get(perpSymbol);
+    if (spread.error) {
+      entry.errors.push(`${spread.isSpot ? 'SPOT' : 'PERP'}: ${spread.error}`);
+    }
     if (spread.isSpot) {
       entry.spotSpreadPercent = spread.spreadPercent;
       entry.spotMid = spread.mid;
@@ -143,10 +151,11 @@ export function filterOpportunities(marketData, thresholds) {
     }
 
     // Check errors
-    if (bidAsk.error || perpSpot.error || volume.error || funding.error || funding.historyError) {
+    if (bidAsk.errors?.length > 0 || bidAsk.error || perpSpot.error || volume.error || funding.error || funding.historyError) {
       rejected.missingData.push({
         symbol,
         errors: [
+          ...(bidAsk.errors || []),
           bidAsk.error,
           perpSpot.error,
           volume.error,
@@ -160,6 +169,21 @@ export function filterOpportunities(marketData, thresholds) {
     // Filter by bid-ask spread (both PERP and SPOT must be acceptable)
     const perpBidAskPct = bidAsk.perpSpreadPercent;
     const spotBidAskPct = bidAsk.spotSpreadPercent;
+
+    if (!isFiniteNumber(perpBidAskPct) || !isFiniteNumber(spotBidAskPct) ||
+        !isFiniteNumber(bidAsk.perpMid) || !isFiniteNumber(bidAsk.spotMid)) {
+      rejected.missingData.push({
+        symbol,
+        missing: [
+          !isFiniteNumber(perpBidAskPct) && 'perpSpread',
+          !isFiniteNumber(spotBidAskPct) && 'spotSpread',
+          !isFiniteNumber(bidAsk.perpMid) && 'perpMid',
+          !isFiniteNumber(bidAsk.spotMid) && 'spotMid'
+        ].filter(Boolean)
+      });
+      continue;
+    }
+
     const maxBidAskPct = Math.max(perpBidAskPct, spotBidAskPct);
 
     if (maxBidAskPct > maxBidAskSpreadPercent) {
@@ -200,7 +224,7 @@ export function filterOpportunities(marketData, thresholds) {
     // CRITICAL: Filter by PREDICTED funding rate (what will be paid NEXT)
     // Use predicted rate if available, otherwise fall back to historical average
     const predictedRate = predictedFunding?.predictedAnnualizedRate;
-    const avgFundingRate = funding.history?.avg?.annualized || funding.annualizedRate;
+    const avgFundingRate = funding.history?.avg?.annualized ?? funding.annualizedRate;
 
     // For filtering, use predicted rate (what we'll actually earn)
     const filterFundingRate = predictedRate !== null && predictedRate !== undefined ? predictedRate : avgFundingRate;
@@ -209,7 +233,7 @@ export function filterOpportunities(marketData, thresholds) {
     if (filterFundingPercent < minFundingRatePercent) {
       rejected.funding.push({
         symbol,
-        predictedFunding: predictedRate ? (predictedRate * 100) : null,
+        predictedFunding: predictedRate !== null && predictedRate !== undefined ? (predictedRate * 100) : null,
         avgFunding: avgFundingRate * 100,
         usedForFilter: filterFundingPercent,
         threshold: minFundingRatePercent
@@ -227,7 +251,7 @@ export function filterOpportunities(marketData, thresholds) {
       predictedFunding,  // Include predicted funding data
       // Composite scores - use predicted rate for ranking (what we'll actually earn)
       predictedFundingRate: predictedRate,
-      predictedFundingPercent: predictedRate ? (predictedRate * 100) : null,
+      predictedFundingPercent: predictedRate !== null && predictedRate !== undefined ? (predictedRate * 100) : null,
       avgFundingRate: avgFundingRate,
       avgFundingPercent: avgFundingRate * 100,
       // Use predicted for primary metric, fall back to average if not available

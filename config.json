@@ -60,7 +60,8 @@
     "minFillRatio": 0.999,
     "maxOpenHedgeMismatchPercent": 2,
     "maxHedgeMismatchPercent": 30,
-    "notes": "Managed spot symbols default to trading.pairs mapped to SPOT symbols. Set managedSpotSymbols only to override that default."
+    "startupCleanupMode": "hedge-only",
+    "notes": "startupCleanupMode: report-only, hedge-only, or hedge-or-close. Managed spot symbols default to trading.pairs mapped to SPOT symbols. Set managedSpotSymbols only to override that default."
   },
   "notes": {
     "description": "Trading configuration for Hyperliquid spot and perp markets",

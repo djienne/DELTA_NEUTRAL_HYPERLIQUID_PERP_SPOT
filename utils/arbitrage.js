@@ -7,19 +7,19 @@ import HyperliquidConnector from '../hyperliquid.js';
 
 /**
  * Helper function to limit concurrent requests
- * @param {Array<Promise>} promises - Array of promise-returning functions
+ * @param {Array<Function>} tasks - Array of promise-returning functions
  * @param {number} limit - Maximum number of concurrent requests
  * @param {number} delayBetweenBatches - Delay in ms between batches
  * @returns {Promise<Array>} Results array
  */
-async function fetchWithConcurrencyLimit(promises, limit = 10, delayBetweenBatches = 200) {
+export async function fetchWithConcurrencyLimit(tasks, limit = 10, delayBetweenBatches = 200) {
   const results = [];
-  for (let i = 0; i < promises.length; i += limit) {
-    const batch = promises.slice(i, i + limit);
-    const batchResults = await Promise.all(batch);
+  for (let i = 0; i < tasks.length; i += limit) {
+    const batch = tasks.slice(i, i + limit);
+    const batchResults = await Promise.all(batch.map(task => task()));
     results.push(...batchResults);
     // Small delay between batches to respect rate limits
-    if (i + limit < promises.length) {
+    if (i + limit < tasks.length) {
       await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
     }
   }
@@ -103,6 +103,8 @@ async function getSinglePerpSpotSpread(hyperliquid, perpSymbol, priceMap) {
  */
 export async function getPerpSpotSpreads(hyperliquid, perpSymbols, options = {}) {
   const {
+    concurrency,
+    delayBetweenBatches,
     verbose = true,
     config
   } = options;
@@ -125,20 +127,22 @@ export async function getPerpSpotSpreads(hyperliquid, perpSymbols, options = {})
     console.log();
   }
 
+  const rateLimitConfig = config?.rateLimit || {};
+  const finalConcurrency = concurrency ?? rateLimitConfig.maxConcurrentRequests ?? 10;
+  const finalDelay = delayBetweenBatches ?? rateLimitConfig.delayBetweenBatches ?? 200;
+
   // Calculate spreads for each pair
-  const results = [];
-  for (const perpSymbol of perpSymbols) {
+  const tasks = perpSymbols.map(perpSymbol => async () => {
     const spotSymbol = HyperliquidConnector.perpToSpot(perpSymbol);
 
     if (verbose) {
       console.log(`Checking spread for ${perpSymbol} vs ${spotSymbol}...`);
     }
 
-    const result = await getSinglePerpSpotSpread(hyperliquid, perpSymbol, priceMap);
-    results.push(result);
-  }
+    return await getSinglePerpSpotSpread(hyperliquid, perpSymbol, priceMap);
+  });
 
-  return results;
+  return await fetchWithConcurrencyLimit(tasks, finalConcurrency, finalDelay);
 }
 
 /**

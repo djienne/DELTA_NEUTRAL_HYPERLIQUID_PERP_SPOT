@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import HyperliquidConnector from '../../hyperliquid.js';
 import { getLeverageSettings } from '../../utils/leverage.js';
-import { getHistoryStats, recordPosition, closePosition } from '../../utils/state.js';
+import { getHistoryStats, loadState, recordPosition, closePosition, saveState } from '../../utils/state.js';
 import { timestamp } from '../../bot.js';
 
 test('bot timestamp is available at module scope', () => {
@@ -94,4 +97,24 @@ test('state compacts order responses and history stats use component total PnL',
   });
 
   assert.equal(getHistoryStats(closed).totalPnl, 4.5);
+});
+
+test('state file path can point at a missing directory', () => {
+  const previous = process.env.BOT_STATE_FILE;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hl-state-'));
+  const stateFile = path.join(tempDir, 'nested', 'bot-state.json');
+  process.env.BOT_STATE_FILE = stateFile;
+
+  try {
+    saveState({ version: '1.0', position: null, history: [{ totalPnl: 1 }] });
+    assert.equal(fs.existsSync(stateFile), true);
+    assert.equal(loadState().history.length, 1);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.BOT_STATE_FILE;
+    } else {
+      process.env.BOT_STATE_FILE = previous;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });

@@ -8,11 +8,13 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      BOT_STATE_FILE: /app/data/bot-state.json
 
     # Volume mounts for persistent data
     volumes:
       # Persist bot state across container restarts
-      - ./bot-state.json:/app/bot-state.json
+      - ./data:/app/data
       # Optional: Mount config if you want to modify without rebuilding
       - ./config.json:/app/config.json:ro
 

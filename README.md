@@ -39,6 +39,8 @@ docker compose logs -f
 
 **Docker Commands**: `up -d` (start) | `logs -f` (view) | `restart` | `down` (stop) | `ps` (status)
 
+Docker persists runtime state under `./data/bot-state.json` by default.
+
 ### What It Looks Like
 
 <img src="screen.png" alt="Bot Running Example" width="600">
@@ -72,7 +74,7 @@ The bot uses **Hyperliquid API key** (from More → API) which can only trade, n
 - Opens positions using 95% of balance
 - Holds for minimum 2 weeks (configurable)
 - Switches if 2x better opportunity found
-- Closes immediately if funding turns negative
+- Closes immediately if funding turns negative, even before the normal minimum hold time
 - Rebalances imbalanced positions at startup
 
 ---
@@ -117,6 +119,7 @@ HL_PRIVATE_KEY=0x...      # API key from Hyperliquid (More → API)
 - `bot.improvementFactor`: Required improvement to switch (default: 2x)
 - `thresholds.minVolumeUSDC`: Min 24h volume (default: $75M)
 - `thresholds.minFundingRatePercent`: Min funding APY (default: 5%)
+- `risk.startupCleanupMode`: Startup behavior for imbalanced exposure (`report-only`, `hedge-only`, or `hedge-or-close`; default: `hedge-only`)
 
 ---
 

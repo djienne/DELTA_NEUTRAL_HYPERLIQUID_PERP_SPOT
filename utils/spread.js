@@ -6,19 +6,19 @@ import HyperliquidConnector from '../hyperliquid.js';
 
 /**
  * Helper function to limit concurrent requests
- * @param {Array<Promise>} promises - Array of promise-returning functions
+ * @param {Array<Function>} tasks - Array of promise-returning functions
  * @param {number} limit - Maximum number of concurrent requests
  * @param {number} delayBetweenBatches - Delay in ms between batches
  * @returns {Promise<Array>} Results array
  */
-async function fetchWithConcurrencyLimit(promises, limit = 10, delayBetweenBatches = 200) {
+export async function fetchWithConcurrencyLimit(tasks, limit = 10, delayBetweenBatches = 200) {
   const results = [];
-  for (let i = 0; i < promises.length; i += limit) {
-    const batch = promises.slice(i, i + limit);
-    const batchResults = await Promise.all(batch);
+  for (let i = 0; i < tasks.length; i += limit) {
+    const batch = tasks.slice(i, i + limit);
+    const batchResults = await Promise.all(batch.map(task => task()));
     results.push(...batchResults);
     // Small delay between batches to respect rate limits
-    if (i + limit < promises.length) {
+    if (i + limit < tasks.length) {
       await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
     }
   }
@@ -47,9 +47,6 @@ function calculateSpreadPercent(bid, ask) {
  */
 async function getSingleSpread(hyperliquid, symbol, isSpot) {
   try {
-    // Get all mids to get the price
-    const allMids = await hyperliquid.getAllMids();
-
     // For spot, we need to use the orderbook coin format
     let coin = symbol;
     if (isSpot) {
@@ -130,7 +127,7 @@ export async function getBidAskSpreads(hyperliquid, perpSymbols, options = {}) {
   const finalDelay = delayBetweenBatches ?? rateLimitConfig.delayBetweenBatches ?? 200;
 
   // Create all fetch promises for both perp and spot
-  const fetchPromises = perpSymbols.flatMap(perpSymbol => {
+  const fetchTasks = perpSymbols.flatMap(perpSymbol => {
     const spotSymbol = HyperliquidConnector.perpToSpot(perpSymbol);
 
     if (verbose) {
@@ -138,13 +135,13 @@ export async function getBidAskSpreads(hyperliquid, perpSymbols, options = {}) {
     }
 
     return [
-      getSingleSpread(hyperliquid, perpSymbol, false),
-      getSingleSpread(hyperliquid, spotSymbol, true)
+      () => getSingleSpread(hyperliquid, perpSymbol, false),
+      () => getSingleSpread(hyperliquid, spotSymbol, true)
     ];
   });
 
   // Execute with concurrency limit
-  const results = await fetchWithConcurrencyLimit(fetchPromises, finalConcurrency, finalDelay);
+  const results = await fetchWithConcurrencyLimit(fetchTasks, finalConcurrency, finalDelay);
 
   return results;
 }

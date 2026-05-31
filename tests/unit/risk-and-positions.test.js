@@ -5,7 +5,8 @@ import {
   getMaxBidAskSpreadPercent,
   getMaxHedgeMismatchPercent,
   getMaxOpenHedgeMismatchPercent,
-  getMinFillRatio
+  getMinFillRatio,
+  getStartupCleanupMode
 } from '../../utils/risk.js';
 import { analyzeDeltaNeutral } from '../../utils/positions.js';
 
@@ -20,6 +21,14 @@ test('risk defaults are stable', () => {
   assert.equal(getMinFillRatio({}), 0.999);
   assert.equal(getMaxOpenHedgeMismatchPercent({}), 2);
   assert.equal(getMaxHedgeMismatchPercent({}), 30);
+  assert.equal(getStartupCleanupMode({}), 'hedge-only');
+});
+
+test('startup cleanup mode is allowlisted', () => {
+  assert.equal(getStartupCleanupMode({ risk: { startupCleanupMode: 'report-only' } }), 'report-only');
+  assert.equal(getStartupCleanupMode({ risk: { startupCleanupMode: 'hedge-only' } }), 'hedge-only');
+  assert.equal(getStartupCleanupMode({ risk: { startupCleanupMode: 'hedge-or-close' } }), 'hedge-or-close');
+  assert.equal(getStartupCleanupMode({ risk: { startupCleanupMode: 'unexpected' } }), 'hedge-only');
 });
 
 test('managed spot symbols derive from configured pairs and current state', () => {

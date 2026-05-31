@@ -22,6 +22,13 @@ export function getTakerFeeRate(config = {}) {
   return config.trading?.takerFeeRate ?? config.fees?.takerFeeRate ?? 0;
 }
 
+export function getStartupCleanupMode(config = {}) {
+  const mode = config.risk?.startupCleanupMode ?? 'hedge-only';
+  const allowedModes = new Set(['report-only', 'hedge-only', 'hedge-or-close']);
+
+  return allowedModes.has(mode) ? mode : 'hedge-only';
+}
+
 export function getManagedSpotSymbols(config = {}, currentPosition = null) {
   const managed = new Set(config.risk?.managedSpotSymbols || []);
 

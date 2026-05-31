@@ -42,7 +42,7 @@ export async function updateLeverage(hyperliquid, coin, leverage, isCross = fals
     leverage: leverage
   };
 
-  const nonce = Date.now();
+  const nonce = typeof hyperliquid.nextNonce === 'function' ? hyperliquid.nextNonce() : Date.now();
 
   // Sign action
   const signature = await hyperliquid.signAction(action, nonce, options.vaultAddress, options.expiresAfter);
