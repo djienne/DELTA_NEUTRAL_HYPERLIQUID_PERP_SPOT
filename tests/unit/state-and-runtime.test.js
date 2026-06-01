@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import HyperliquidConnector from '../../hyperliquid.js';
 import { getLeverageSettings } from '../../utils/leverage.js';
-import { getHistoryStats, loadState, recordPosition, closePosition, saveState } from '../../utils/state.js';
+import { clearPendingIntent, getHistoryStats, loadState, recordPosition, closePosition, saveState, setPendingIntent } from '../../utils/state.js';
 import { timestamp } from '../../bot.js';
 
 test('bot timestamp is available at module scope', () => {
@@ -109,6 +109,39 @@ test('state file path can point at a missing directory', () => {
     saveState({ version: '1.0', position: null, history: [{ totalPnl: 1 }] });
     assert.equal(fs.existsSync(stateFile), true);
     assert.equal(loadState().history.length, 1);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.BOT_STATE_FILE;
+    } else {
+      process.env.BOT_STATE_FILE = previous;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('pending intents are persisted and cleared through state helpers', () => {
+  const initial = { version: '1.0', position: null, history: [] };
+  const pending = setPendingIntent(initial, { type: 'opening', symbol: 'BTC', createdAt: 123 });
+
+  assert.equal(pending.pendingIntent.type, 'opening');
+  assert.equal(pending.pendingIntent.createdAt, 123);
+  assert.equal(clearPendingIntent(pending).pendingIntent, null);
+});
+
+test('corrupt state file is quarantined instead of silently reused', () => {
+  const previous = process.env.BOT_STATE_FILE;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hl-state-corrupt-'));
+  const stateFile = path.join(tempDir, 'bot-state.json');
+  process.env.BOT_STATE_FILE = stateFile;
+
+  try {
+    fs.writeFileSync(stateFile, '{not-json', 'utf8');
+    const loaded = loadState();
+    const quarantined = fs.readdirSync(tempDir).filter(name => name.includes('.corrupt-'));
+
+    assert.equal(loaded.position, null);
+    assert.equal(fs.existsSync(stateFile), false);
+    assert.equal(quarantined.length, 1);
   } finally {
     if (previous === undefined) {
       delete process.env.BOT_STATE_FILE;

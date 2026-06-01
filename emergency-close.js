@@ -1,5 +1,6 @@
 import HyperliquidConnector from './hyperliquid.js';
 import { getPerpPositions, getSpotBalances } from './utils/positions.js';
+import { assertCompleteFill } from './utils/order-fill.js';
 import fs from 'fs';
 
 /**
@@ -16,6 +17,7 @@ import fs from 'fs';
  */
 
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
+HyperliquidConnector.configureSymbolMapping(config.symbolMapping || {});
 
 async function closePosition(hyperliquid, position, type, priceMap) {
   const symbol = position.symbol;
@@ -37,9 +39,9 @@ async function closePosition(hyperliquid, position, type, priceMap) {
     // Get price for this symbol
     let price;
     if (isSpot) {
-      // For SPOT, convert to PERP symbol to get price
-      const perpSymbol = HyperliquidConnector.spotToPerp(symbol);
-      price = priceMap[perpSymbol];
+      const assetId = await hyperliquid.getAssetId(symbol, true);
+      const spotCoin = hyperliquid.getCoinForOrderbook(symbol, assetId);
+      price = priceMap[spotCoin];
     } else {
       price = priceMap[symbol];
     }
@@ -51,21 +53,30 @@ async function closePosition(hyperliquid, position, type, priceMap) {
     // Get asset info for proper rounding
     const assetId = await hyperliquid.getAssetId(symbol, isSpot);
     const assetInfo = hyperliquid.getAssetInfo(symbol, assetId);
-    const sizeRounded = parseFloat(hyperliquid.roundSize(size, assetInfo.szDecimals));
+    const sizeRounded = parseFloat(hyperliquid.roundSize(size, assetInfo.szDecimals, 'down'));
+    const roundedNotional = sizeRounded * price;
+    if (roundedNotional < 10) {
+      throw new Error(`Rounded order notional ($${roundedNotional.toFixed(2)}) is below minimum ($10)`);
+    }
 
     const result = await hyperliquid.createMarketOrder(symbol, closeSide, sizeRounded, {
       isSpot: isSpot,
       reduceOnly: isSpot ? false : true, // reduceOnly only works for PERP
       slippage: config.trading.maxSlippagePercent,
-      overrideMidPrice: price
+      overrideMidPrice: price,
+      sizeRoundingMode: 'down'
     });
 
-    const filled = result.response?.data?.statuses?.[0]?.filled;
+    const outcome = assertCompleteFill(result, sizeRounded, {
+      minFillRatio: config.risk?.minFillRatio || 0.999,
+      fallbackPrice: price,
+      context: { emergencyClose: true, symbol, type }
+    });
     const error = result.response?.data?.statuses?.[0]?.error;
 
-    if (filled) {
-      const fillPx = parseFloat(filled.avgPx || 0);
-      const fillSz = parseFloat(filled.totalSz || sizeRounded);
+    if (outcome.isCompleteFill) {
+      const fillPx = outcome.fillPrice;
+      const fillSz = outcome.fillSize;
       console.log(`[${type}] ✅ ${symbol} closed: ${fillSz} @ $${fillPx.toFixed(2)}`);
       return { success: true, symbol, type, size: fillSz, price: fillPx };
     } else {
@@ -136,8 +147,9 @@ async function main() {
   const spotSkipped = [];
 
   for (const bal of spotBalances) {
-    const perpSymbol = HyperliquidConnector.spotToPerp(bal.symbol);
-    const price = priceMap[perpSymbol];
+    const spotAssetId = await hyperliquid.getAssetId(bal.symbol, true);
+    const spotCoin = hyperliquid.getCoinForOrderbook(bal.symbol, spotAssetId);
+    const price = priceMap[spotCoin];
     const notional = price ? bal.total * price : 0;
     if (notional >= MIN_NOTIONAL) {
       spotToClose.push(bal);
@@ -159,8 +171,9 @@ async function main() {
   if (spotToClose.length > 0) {
     console.log('SPOT Balances to close:');
     for (const bal of spotToClose) {
-      const perpSymbol = HyperliquidConnector.spotToPerp(bal.symbol);
-      const value = bal.total * priceMap[perpSymbol];
+      const spotAssetId = await hyperliquid.getAssetId(bal.symbol, true);
+      const spotCoin = hyperliquid.getCoinForOrderbook(bal.symbol, spotAssetId);
+      const value = bal.total * priceMap[spotCoin];
       console.log(`  ${bal.symbol}: ${bal.total} (~$${value.toFixed(2)})`);
     }
     console.log();
@@ -240,8 +253,60 @@ async function main() {
   console.log();
   console.log('═'.repeat(80));
 
+  console.log();
+  console.log('Verifying remaining on-chain exposure...');
+  const finalMids = await hyperliquid.getAllMids();
+  const finalPriceMap = {};
+  for (const [symbol, priceStr] of Object.entries(finalMids)) {
+    finalPriceMap[symbol] = parseFloat(priceStr);
+  }
+
+  const [remainingPerps, remainingSpots] = await Promise.all([
+    getPerpPositions(hyperliquid, null, { verbose: false }),
+    getSpotBalances(hyperliquid, null, { verbose: false })
+  ]);
+
+  const residuals = [];
+  for (const pos of remainingPerps) {
+    const price = finalPriceMap[pos.symbol];
+    const notional = Number.isFinite(price) ? Math.abs(pos.sizeRaw * price) : null;
+    if (notional === null || notional >= MIN_NOTIONAL) {
+      residuals.push({
+        type: 'PERP',
+        symbol: pos.symbol,
+        size: Math.abs(pos.sizeRaw),
+        notional
+      });
+    }
+  }
+
+  for (const bal of remainingSpots) {
+    const spotAssetId = await hyperliquid.getAssetId(bal.symbol, true);
+    const spotCoin = hyperliquid.getCoinForOrderbook(bal.symbol, spotAssetId);
+    const price = finalPriceMap[spotCoin];
+    const notional = Number.isFinite(price) ? bal.total * price : null;
+    if (notional === null || notional >= MIN_NOTIONAL) {
+      residuals.push({
+        type: 'SPOT',
+        symbol: bal.symbol,
+        size: bal.total,
+        notional
+      });
+    }
+  }
+
+  if (residuals.length > 0) {
+    console.log(`âŒ Residual exposure remains: ${residuals.length} position(s)`);
+    for (const residual of residuals) {
+      const notionalText = residual.notional === null ? 'unknown notional' : `$${residual.notional.toFixed(2)}`;
+      console.log(`  ${residual.type} ${residual.symbol}: ${residual.size} (${notionalText})`);
+    }
+  } else {
+    console.log('âœ… No remaining exposure above minimum notional.');
+  }
+
   hyperliquid.disconnect();
-  process.exit(failed.length > 0 ? 1 : 0);
+  process.exit(failed.length > 0 || residuals.length > 0 ? 1 : 0);
 }
 
 main().catch(error => {

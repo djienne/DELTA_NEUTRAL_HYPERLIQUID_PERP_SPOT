@@ -1,5 +1,5 @@
 import HyperliquidConnector from './hyperliquid.js';
-import { loadState, saveState, hasPosition, getCurrentPosition, recordPosition, closePosition as closePositionState, updateCheckTime, canClosePosition, getPositionAge, formatPosition, getHistoryStats } from './utils/state.js';
+import { loadState, saveState, hasPosition, getCurrentPosition, recordPosition, closePosition as closePositionState, updateCheckTime, canClosePosition, getPositionAge, formatPosition, getHistoryStats, setPendingIntent, clearPendingIntent } from './utils/state.js';
 import { checkAndReportBalances } from './utils/balance.js';
 import { findBestOpportunities, isSignificantlyBetter } from './utils/opportunity.js';
 import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral } from './utils/positions.js';
@@ -9,7 +9,7 @@ import { autoHedgeAll, analyzeHedgeNeeds, formatHedgeReport } from './utils/hedg
 import { getFundingRates } from './utils/funding.js';
 import { get24HourVolumes, convertVolumesToUSDC } from './utils/volume.js';
 import { getPerpSpotSpreads } from './utils/arbitrage.js';
-import { getManagedSpotSymbols, getMaxHedgeMismatchPercent, getStartupCleanupMode } from './utils/risk.js';
+import { getManagedPerpSymbols, getManagedSpotSymbols, getMaxHedgeMismatchPercent, getStartupCleanupMode } from './utils/risk.js';
 import { getCurrentPositionFundingSignal, getPositiveReopenOpportunity, isNegativeFundingSignal } from './utils/position-decision.js';
 import fs from 'fs';
 import { pathToFileURL } from 'url';
@@ -70,6 +70,7 @@ async function retryWithExponentialBackoff(fn, options = {}) {
 
 // Configuration
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
+HyperliquidConnector.configureSymbolMapping(config.symbolMapping || {});
 
 // Bot parameters
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;  // 1 hour
@@ -85,6 +86,10 @@ let state = null;
 let hyperliquid = null;
 let isRunning = false;
 let cycleCount = 0;
+let cycleInterval = null;
+let statusInterval = null;
+let activeCyclePromise = null;
+let shutdownRequested = false;
 
 function timestamp() {
   return `[${new Date().toLocaleTimeString()}]`;
@@ -168,9 +173,10 @@ async function verifyPositionOnChain() {
   console.log('[Bot] Verifying position on-chain...');
   const currentPosition = hasPosition(state) ? getCurrentPosition(state) : null;
   const managedSpotSymbols = getManagedSpotSymbols(config, currentPosition);
+  const managedPerpSymbols = getManagedPerpSymbols(config, currentPosition);
 
   const [perpPositions, spotBalances] = await Promise.all([
-    getPerpPositions(hyperliquid, null, { verbose: false }),
+    getPerpPositions(hyperliquid, null, { verbose: false, managedPerpSymbols }),
     getSpotBalances(hyperliquid, null, { verbose: false, managedSpotSymbols })
   ]);
 
@@ -211,6 +217,89 @@ async function verifyPositionOnChain() {
   return { status: 'imbalanced', pair: null, analysis };
 }
 
+async function confirmNoManagedExposure(confirmations = 3, delayMs = 750) {
+  for (let i = 0; i < confirmations; i++) {
+    const onChainPosition = await verifyPositionOnChain();
+    if (onChainPosition.status !== 'none') {
+      return false;
+    }
+    if (i < confirmations - 1) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  return true;
+}
+
+async function adoptOnChainPair(pair, reason = 'adopted on-chain position') {
+  const allMids = await hyperliquid.getAllMids();
+  const perpPrice = parseFloat(allMids[pair.symbol] || pair.perpPosition.entryPrice || '0');
+  const spotSymbol = HyperliquidConnector.perpToSpot(pair.symbol);
+  let spotPrice = perpPrice;
+
+  try {
+    const spotAssetId = await hyperliquid.getAssetId(spotSymbol, true);
+    const spotCoin = hyperliquid.getCoinForOrderbook(spotSymbol, spotAssetId);
+    const parsedSpot = parseFloat(allMids[spotCoin]);
+    if (Number.isFinite(parsedSpot) && parsedSpot > 0) {
+      spotPrice = parsedSpot;
+    }
+  } catch {
+    // Fall back to perp mid if the spot mid is unavailable during adoption.
+  }
+
+  state = recordPosition(state, {
+    success: true,
+    symbol: pair.symbol,
+    perpSymbol: pair.symbol,
+    spotSymbol,
+    perpSize: pair.perpSize,
+    spotSize: pair.spotSize,
+    perpEntryPrice: Number.isFinite(pair.perpPosition.entryPrice) && pair.perpPosition.entryPrice > 0
+      ? pair.perpPosition.entryPrice
+      : perpPrice,
+    spotEntryPrice: spotPrice,
+    positionValue: pair.perpSize * (Number.isFinite(perpPrice) && perpPrice > 0 ? perpPrice : pair.perpPosition.entryPrice),
+    fundingRate: 0,
+    annualizedFunding: 0,
+    openFeesActual: 0,
+    openFeesEstimated: 0,
+    openTime: state.pendingIntent?.createdAt || Date.now(),
+    adoptionReason: reason
+  });
+  saveState(state);
+  console.log(`${timestamp()} [Bot] Adopted managed on-chain position into state (${reason})`);
+}
+
+async function reconcilePendingIntent() {
+  if (!state?.pendingIntent) {
+    return;
+  }
+
+  console.log(`${timestamp()} [Bot] Reconciling pending intent: ${state.pendingIntent.type}`);
+  const onChainPosition = await verifyPositionOnChain();
+
+  if (onChainPosition.status === 'delta_neutral') {
+    await adoptOnChainPair(onChainPosition.pair, `pending ${state.pendingIntent.type}`);
+    return;
+  }
+
+  if (onChainPosition.status === 'none') {
+    state = clearPendingIntent(state);
+    saveState(state);
+    console.log(`${timestamp()} [Bot] Pending intent cleared; no managed exposure on-chain`);
+    return;
+  }
+
+  await autoHedgeAll(hyperliquid, config, {
+    verbose: true,
+    minValueUSD: 1,
+    fallbackToClose: false,
+    managedSpotSymbols: Array.from(getManagedSpotSymbols(config, getCurrentPosition(state))),
+    managedPerpSymbols: Array.from(getManagedPerpSymbols(config, getCurrentPosition(state))),
+    maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
+  });
+}
+
 /**
  * Clean up imbalanced positions at startup
  * Uses the hedge utility to automatically hedge or close unhedged positions
@@ -221,7 +310,9 @@ async function cleanupImbalancedPositions() {
 
   try {
     const startupCleanupMode = getStartupCleanupMode(config);
-    const managedSpotSymbols = Array.from(getManagedSpotSymbols(config, hasPosition(state) ? getCurrentPosition(state) : null));
+    const currentPosition = hasPosition(state) ? getCurrentPosition(state) : null;
+    const managedSpotSymbols = Array.from(getManagedSpotSymbols(config, currentPosition));
+    const managedPerpSymbols = Array.from(getManagedPerpSymbols(config, currentPosition));
     const maxHedgeMismatchPercent = getMaxHedgeMismatchPercent(config);
 
     if (startupCleanupMode === 'report-only') {
@@ -229,6 +320,7 @@ async function cleanupImbalancedPositions() {
         verbose: false,
         minValueUSD: 1,
         managedSpotSymbols,
+        managedPerpSymbols,
         maxHedgeMismatchPercent
       });
 
@@ -248,6 +340,7 @@ async function cleanupImbalancedPositions() {
       minValueUSD: 1,
       fallbackToClose: startupCleanupMode === 'hedge-or-close',
       managedSpotSymbols,
+      managedPerpSymbols,
       maxHedgeMismatchPercent
     });
 
@@ -318,7 +411,12 @@ async function runCycle() {
       const onChainPosition = await verifyPositionOnChain();
 
       if (onChainPosition.status === 'none') {
-        console.log(`${timestamp()} [Bot] ⚠️  Position in state but not on-chain! Clearing state.`);
+        const confirmedFlat = await confirmNoManagedExposure();
+        if (!confirmedFlat) {
+          console.log(`${timestamp()} [Bot] Managed exposure reappeared during flat confirmation. Keeping state and halting this cycle.`);
+          return;
+        }
+        console.log(`${timestamp()} [Bot] Position in state confirmed absent on-chain. Clearing state.`);
         state = closePositionState(state, {
           reason: 'Position not found on-chain',
           perpClosePrice: 0,
@@ -333,6 +431,7 @@ async function runCycle() {
           minValueUSD: 1,
           fallbackToClose: false,
           managedSpotSymbols: Array.from(getManagedSpotSymbols(config, position)),
+          managedPerpSymbols: Array.from(getManagedPerpSymbols(config, position)),
           maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
         });
         return;
@@ -392,11 +491,15 @@ async function runCycle() {
             if (rawFundingData && !rawFundingData.error) {
               // CRITICAL: Use PREDICTED funding rate (what will be paid NEXT), not historical
               const predictedFunding = rawPredictedData?.predictedAnnualizedRate;
-              const avgFunding = rawFundingData.history?.avg?.annualized || rawFundingData.annualizedRate;
-              const useFunding = predictedFunding !== null && predictedFunding !== undefined ? predictedFunding : avgFunding;
+              const avgFunding = rawFundingData.history?.avg?.annualized ?? rawFundingData.annualizedRate;
+              const useFunding = Number.isFinite(predictedFunding) ? predictedFunding : avgFunding;
+              if (!Number.isFinite(useFunding)) {
+                console.log(`${timestamp()} [4/6] Funding data for ${position.symbol} is not finite. Skipping close decision.`);
+                return;
+              }
               const useFundingPercent = useFunding * 100;
 
-              console.log(`${timestamp()} [4/6] Funding data: ${useFundingPercent.toFixed(2)}% APY ${predictedFunding !== null && predictedFunding !== undefined ? '(predicted)' : '(avg)'}`);
+              console.log(`${timestamp()} [4/6] Funding data: ${useFundingPercent.toFixed(2)}% APY ${Number.isFinite(predictedFunding) ? '(predicted)' : '(avg)'}`);
 
               // Check if funding is negative
               if (useFundingPercent < 0) {
@@ -432,7 +535,11 @@ async function runCycle() {
           } else {
             // CRITICAL: Use primaryFundingPercent (predicted if available, else avg)
             const currentFunding = currentSymbolOpp.primaryFundingPercent;
-            const fundingType = currentSymbolOpp.predictedFundingPercent !== null && currentSymbolOpp.predictedFundingPercent !== undefined ? '(predicted)' : '(avg)';
+            if (!Number.isFinite(currentFunding)) {
+              console.log(`${timestamp()} [4/6] Current funding for ${position.symbol} is not finite. Holding current position.`);
+              return;
+            }
+            const fundingType = Number.isFinite(currentSymbolOpp.predictedFundingPercent) ? '(predicted)' : '(avg)';
             console.log(`${timestamp()} [4/6] Current position ${position.symbol} funding: ${currentFunding.toFixed(2)}% APY ${fundingType}`);
 
             // Check if funding is negative
@@ -495,9 +602,20 @@ async function runCycle() {
       const onChainPosition = await verifyPositionOnChain();
 
       if (onChainPosition.status !== 'none') {
-        console.log(`${timestamp()} [Bot] ⚠️  Found position on-chain but not in state!`);
-        console.log(`${timestamp()} [Bot]    Status: ${onChainPosition.status}. Please close manually or wait for next cycle.`);
-        // Don't open new position if there's one on-chain
+        console.log(`${timestamp()} [Bot] Found position on-chain but not in state!`);
+        if (onChainPosition.status === 'delta_neutral') {
+          await adoptOnChainPair(onChainPosition.pair, 'existing managed exposure');
+        } else {
+          console.log(`${timestamp()} [Bot] Status: ${onChainPosition.status}. Attempting hedge-only startup reconciliation.`);
+          await autoHedgeAll(hyperliquid, config, {
+            verbose: true,
+            minValueUSD: 1,
+            fallbackToClose: false,
+            managedSpotSymbols: Array.from(getManagedSpotSymbols(config, null)),
+            managedPerpSymbols: Array.from(getManagedPerpSymbols(config, null)),
+            maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
+          });
+        }
         return;
       }
     }
@@ -531,6 +649,14 @@ async function runCycle() {
     console.log();
 
     try {
+      state = setPendingIntent(state, {
+        type: 'opening',
+        symbol: analysis.best.symbol,
+        perpSymbol: analysis.best.symbol,
+        spotSymbol: HyperliquidConnector.perpToSpot(analysis.best.symbol)
+      });
+      saveState(state);
+
       const positionResult = await openDeltaNeutralPosition(
         hyperliquid,
         analysis.best,
@@ -554,10 +680,17 @@ async function runCycle() {
         saveState(state);
         console.log(`${timestamp()} [5/6] Position recorded in state`);
       } else {
-        console.log(`${timestamp()} [5/6] ❌ Failed to open position`);
+        console.log(`${timestamp()} [5/6] Failed to open position`);
+        state = clearPendingIntent(state);
+        saveState(state);
       }
     } catch (error) {
-      console.error(`${timestamp()} [5/6] ❌ Error opening position:`, error.message);
+      console.error(`${timestamp()} [5/6] Error opening position:`, error.message);
+      const onChainAfterError = await verifyPositionOnChain();
+      if (onChainAfterError.status === 'none') {
+        state = clearPendingIntent(state);
+        saveState(state);
+      }
     }
 
     console.log(`${timestamp()} [6/6] Next check in 1 hour`);
@@ -577,6 +710,15 @@ async function closeAndReopen(currentPosition, reason, newOpportunity) {
   console.log();
 
   try {
+    state = setPendingIntent(state, {
+      type: 'closing',
+      symbol: currentPosition.symbol,
+      perpSymbol: currentPosition.perpSymbol,
+      spotSymbol: currentPosition.spotSymbol,
+      reason
+    });
+    saveState(state);
+
     // Close current position
     const closeResult = await closeDeltaNeutralPosition(
       hyperliquid,
@@ -602,6 +744,15 @@ async function closeAndReopen(currentPosition, reason, newOpportunity) {
 
         // Get fresh balance data
         const balanceReport = await checkAndReportBalances(hyperliquid, 10);
+
+        state = setPendingIntent(state, {
+          type: 'opening',
+          symbol: newOpportunity.symbol,
+          perpSymbol: newOpportunity.symbol,
+          spotSymbol: HyperliquidConnector.perpToSpot(newOpportunity.symbol),
+          reason: 'reopen after close'
+        });
+        saveState(state);
 
         const positionResult = await openDeltaNeutralPosition(
           hyperliquid,
@@ -734,7 +885,10 @@ async function displayStatus() {
   } else {
     console.log(`${colors.bright}Position:${colors.reset} None`);
     console.log(`${colors.bright}Status:${colors.reset} 🔍 Looking for opportunities...`);
-    console.log(`${colors.dim}Next check: ${new Date(state.lastOpportunityCheck + CHECK_INTERVAL_MS).toLocaleTimeString()}${colors.reset}`);
+    const nextCheck = state.lastOpportunityCheck
+      ? new Date(state.lastOpportunityCheck + CHECK_INTERVAL_MS).toLocaleTimeString()
+      : 'on next cycle';
+    console.log(`${colors.dim}Next check: ${nextCheck}${colors.reset}`);
   }
 
   console.log(colors.dim + '─'.repeat(80) + colors.reset);
@@ -912,37 +1066,45 @@ async function displayStatus() {
 /**
  * Main bot loop
  */
+async function runGuardedCycle() {
+  if (isRunning) {
+    console.log('[Bot] Previous cycle still running, skipping...');
+    return;
+  }
+
+  isRunning = true;
+  activeCyclePromise = runCycle();
+  try {
+    await activeCyclePromise;
+  } catch (error) {
+    console.error('[Bot] Cycle error:', error.message);
+  } finally {
+    activeCyclePromise = null;
+    isRunning = false;
+  }
+}
+
 async function run() {
   await initialize();
+
+  await reconcilePendingIntent();
 
   // Clean up any imbalanced positions from failed trades
   await cleanupImbalancedPositions();
 
   // Run first cycle immediately
-  await runCycle();
+  await runGuardedCycle();
 
   // Display initial status
   await displayStatus();
 
   // Schedule regular cycles
-  setInterval(async () => {
-    if (isRunning) {
-      console.log('[Bot] Previous cycle still running, skipping...');
-      return;
-    }
-
-    isRunning = true;
-    try {
-      await runCycle();
-    } catch (error) {
-      console.error('[Bot] Cycle error:', error.message);
-    } finally {
-      isRunning = false;
-    }
+  cycleInterval = setInterval(async () => {
+    await runGuardedCycle();
   }, CHECK_INTERVAL_MS);
 
   // Schedule status display every 2 minutes
-  setInterval(async () => {
+  statusInterval = setInterval(async () => {
     try {
       await displayStatus();
     } catch (error) {
@@ -959,16 +1121,39 @@ async function run() {
  * Graceful shutdown
  */
 async function shutdown(exitCode = 0) {
+  if (shutdownRequested) {
+    return;
+  }
+  shutdownRequested = true;
   console.log();
   console.log('[Bot] Shutting down...');
+
+  if (cycleInterval) {
+    clearInterval(cycleInterval);
+    cycleInterval = null;
+  }
+  if (statusInterval) {
+    clearInterval(statusInterval);
+    statusInterval = null;
+  }
+
+  if (activeCyclePromise) {
+    console.log('[Bot] Waiting for active cycle to finish...');
+    await Promise.race([
+      activeCyclePromise,
+      new Promise(resolve => setTimeout(resolve, 30000))
+    ]);
+  }
 
   if (hyperliquid) {
     hyperliquid.disconnect();
   }
 
-  if (state) {
+  if (state && !(exitCode !== 0 && state.pendingIntent)) {
     saveState(state);
     console.log('[Bot] State saved');
+  } else if (state?.pendingIntent) {
+    console.log('[Bot] Pending trading intent preserved on disk; skipping blind error-exit save');
   }
 
   console.log('[Bot] Shutdown complete');
@@ -994,7 +1179,7 @@ process.on('unhandledRejection', (error) => {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   run().catch(error => {
     console.error('[Bot] Fatal error:', error);
-    process.exit(1);
+    void shutdown(1);
   });
 }
 

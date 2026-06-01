@@ -17,7 +17,7 @@ function baseMarketData(overrides = {}) {
       { symbol: 'UBTC', isSpot: true, spreadPercent: 0.03, mid: 100 }
     ],
     perpSpotSpreads: [
-      { perpSymbol: 'BTC', spreadPercent: 0.01 }
+      { perpSymbol: 'BTC', spreadPercent: 0.01, perpMid: 100, spotMid: 100 }
     ],
     volumes: [
       { perpSymbol: 'BTC', perpVolUSDC: 100_000_000, spotVolUSDC: 100_000_000 }
@@ -65,6 +65,23 @@ test('opportunity filtering keeps valid complete spread data', () => {
   assert.equal(result.opportunities.length, 1);
   assert.equal(result.opportunities[0].symbol, 'BTC');
   assert.equal(result.opportunities[0].primaryFundingPercent, 12);
+});
+
+test('opportunity filtering rejects non-finite predicted funding', () => {
+  const result = filterOpportunities(baseMarketData({
+    predictedFundingRates: new Map([
+      ['BTC', { predictedAnnualizedRate: NaN }]
+    ])
+  }), {
+    maxSpreadPercent: 0.15,
+    maxPerpSpotSpreadPercent: 0.5,
+    minVolumeUSDC: 75_000_000,
+    minFundingRatePercent: 5
+  });
+
+  assert.equal(result.opportunities.length, 0);
+  assert.equal(result.rejected.funding.length, 1);
+  assert.equal(result.rejected.funding[0].error, 'non-finite funding');
 });
 
 test('position funding signal detects negative funding independently of hold time', () => {

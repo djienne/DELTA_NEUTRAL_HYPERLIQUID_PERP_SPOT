@@ -22,7 +22,8 @@
     },
     "balanceUtilizationPercent": 95,
     "maxSlippagePercent": 5.0,
-    "takerFeeRate": 0,
+    "takerFeeRate": 0.00045,
+    "maxOrderSizeUSD": null,
     "maxRetries": 3,
     "orderWaitTime": 10000
   },

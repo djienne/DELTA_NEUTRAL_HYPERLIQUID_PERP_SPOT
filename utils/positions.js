@@ -23,7 +23,8 @@ import HyperliquidConnector from '../hyperliquid.js';
  * @returns {Promise<Object[]>} Array of PERP position objects
  */
 export async function getPerpPositions(hyperliquid, user = null, options = {}) {
-  const { verbose = false } = options;
+  const { verbose = false, managedPerpSymbols = null } = options;
+  const managedSet = managedPerpSymbols ? new Set(managedPerpSymbols) : null;
 
   try {
     user = user || hyperliquid.wallet;
@@ -76,19 +77,21 @@ export async function getPerpPositions(hyperliquid, user = null, options = {}) {
         // Determine side (positive size = long, negative = short)
         const side = size > 0 ? 'LONG' : size < 0 ? 'SHORT' : 'NONE';
 
-        positions.push({
-          symbol: symbol,
-          side: side,
-          size: Math.abs(size),
-          sizeRaw: size,
-          entryPrice: entryPx,
-          positionValue: Math.abs(positionValue),
-          unrealizedPnl: unrealizedPnl,
-          returnOnEquity: returnOnEquity * 100, // Convert to percentage
-          leverage: parseFloat(asset.leverage?.value || '0'),
-          liquidationPx: parseFloat(asset.liquidationPx || '0'),
-          marginUsed: parseFloat(asset.marginUsed || '0')
-        });
+        if (!managedSet || managedSet.has(symbol)) {
+          positions.push({
+            symbol: symbol,
+            side: side,
+            size: Math.abs(size),
+            sizeRaw: size,
+            entryPrice: entryPx,
+            positionValue: Math.abs(positionValue),
+            unrealizedPnl: unrealizedPnl,
+            returnOnEquity: returnOnEquity * 100, // Convert to percentage
+            leverage: parseFloat(asset.leverage?.value || '0'),
+            liquidationPx: parseFloat(asset.liquidationPx || '0'),
+            marginUsed: parseFloat(asset.marginUsed || '0')
+          });
+        }
       }
     }
 
@@ -181,8 +184,8 @@ export async function getAllPositions(hyperliquid, user = null, options = {}) {
   const { verbose = false } = options;
 
   const [perpPositions, spotBalances] = await Promise.all([
-    getPerpPositions(hyperliquid, user, { verbose }),
-    getSpotBalances(hyperliquid, user, { verbose })
+    getPerpPositions(hyperliquid, user, { verbose, managedPerpSymbols: options.managedPerpSymbols }),
+    getSpotBalances(hyperliquid, user, { verbose, managedSpotSymbols: options.managedSpotSymbols })
   ]);
 
   return {
@@ -230,10 +233,11 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
       const spotSize = spotBalance.total;
       const hedgeRatio = spotSize / perpSize;
 
-      // Determine if this is a proper delta-neutral hedge
-      // Delta neutral requires: SHORT perp + LONG spot OR LONG perp + SHORT spot
-      const isDeltaNeutral = (perpPosition.side === 'SHORT' && spotSize > 0) ||
-                              (perpPosition.side === 'LONG' && spotSize < 0);
+      // Spot balances are long-only in this bot. LONG perp + LONG spot is directional.
+      const isDeltaNeutral = perpPosition.side === 'SHORT' && spotSize > 0;
+      const imbalanceType = isDeltaNeutral
+        ? (perpSize > spotSize ? 'EXCESS_PERP_SHORT' : (spotSize > perpSize ? 'EXCESS_SPOT_LONG' : 'BALANCED'))
+        : (perpPosition.side === 'LONG' && spotSize > 0 ? 'DOUBLE_LONG' : 'UNSUPPORTED');
 
       // Calculate mismatch percentage
       const sizeMismatch = Math.abs(perpSize - spotSize);
@@ -262,6 +266,7 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
         sizeMismatch: sizeMismatch,
         sizeMismatchPct: sizeMismatchPct,
         isDeltaNeutral: isDeltaNeutral,
+        imbalanceType: imbalanceType,
         hedgeQuality: hedgeQuality,
         perpPosition: perpPosition,
         spotBalance: spotBalance

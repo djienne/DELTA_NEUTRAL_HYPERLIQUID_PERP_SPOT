@@ -68,7 +68,7 @@ The bot uses **Hyperliquid API key** (from More → API) which can only trade, n
 - Earn: Funding payments every hour from longs paying people holding short positions (when fundings are positive, that is most of the time)
 
 **The bot automatically**:
-- Selects best opportunities by 7-day avg funding (≥5% APY)
+- Selects best opportunities by predicted funding when available, with 7-day average funding as context
 - Filters by liquidity ($75M+ volume, tight spreads)
 - Sets leverage to 1x isolated per-pair before opening
 - Opens positions using 95% of balance
@@ -115,17 +115,21 @@ HL_PRIVATE_KEY=0x...      # API key from Hyperliquid (More → API)
 **Bot Config (`config.json`)**:
 - `trading.pairs`: Symbols to trade (BTC, ETH, SOL, etc.)
 - `trading.balanceUtilizationPercent`: Use 95% of balance
+- `trading.maxOrderSizeUSD`: Optional hard cap for each new position size (`null` means uncapped)
+- `trading.maxSlippagePercent`: Market order slippage budget, expressed as a percent
+- `trading.takerFeeRate`: Fallback taker fee estimate used when live fills do not include fee data
 - `bot.minHoldTimeDays`: Hold time before rebalancing (default: 14)
 - `bot.improvementFactor`: Required improvement to switch (default: 2x)
 - `thresholds.minVolumeUSDC`: Min 24h volume (default: $75M)
 - `thresholds.minFundingRatePercent`: Min funding APY (default: 5%)
+- `risk.minFillRatio`: Minimum fill ratio required before an order is treated as complete
 - `risk.startupCleanupMode`: Startup behavior for imbalanced exposure (`report-only`, `hedge-only`, or `hedge-or-close`; default: `hedge-only`)
 
 ---
 
 ## Key Features
 
-* ✅ **Automated Selection**: Ranks opportunities by 7-day avg funding
+* ✅ **Automated Selection**: Ranks opportunities by predicted funding when available
 * ✅ **Parallel Execution**: Opens PERP+SPOT simultaneously
 * ✅ **State Persistence**: Recovers positions after restart
 * ✅ **Auto-fixing**: Fixes imbalanced positions at startup

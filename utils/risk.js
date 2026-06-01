@@ -43,6 +43,20 @@ export function getManagedSpotSymbols(config = {}, currentPosition = null) {
   return managed;
 }
 
+export function getManagedPerpSymbols(config = {}, currentPosition = null) {
+  const managed = new Set(config.risk?.managedPerpSymbols || []);
+
+  for (const pair of config.trading?.pairs || []) {
+    managed.add(pair);
+  }
+
+  if (currentPosition?.perpSymbol || currentPosition?.symbol) {
+    managed.add(currentPosition.perpSymbol || currentPosition.symbol);
+  }
+
+  return managed;
+}
+
 export function filterManagedSpotBalances(spotBalances, managedSpotSymbols) {
   if (!managedSpotSymbols || managedSpotSymbols.size === 0) {
     return spotBalances;

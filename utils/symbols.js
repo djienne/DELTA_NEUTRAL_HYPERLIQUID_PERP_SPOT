@@ -1,23 +1,4 @@
-/**
- * Symbol mapping utilities for Hyperliquid PERP <-> SPOT conversions
- */
-
-// Static mapping of PERP symbols to SPOT symbols
-const PERP_TO_SPOT_MAP = {
-  'BTC': 'UBTC',
-  'ETH': 'UETH',
-  'SOL': 'USOL',
-  'XPL': 'UXPL',
-  'PUMP': 'UPUMP',
-  'FARTCOIN': 'UFART',
-  'PURR': 'PURR',
-  'TRUMP': 'TRUMP'
-};
-
-// Reverse mapping
-const SPOT_TO_PERP_MAP = Object.fromEntries(
-  Object.entries(PERP_TO_SPOT_MAP).map(([k, v]) => [v, k])
-);
+import HyperliquidConnector from '../hyperliquid.js';
 
 /**
  * Convert PERP symbol to SPOT symbol
@@ -25,7 +6,7 @@ const SPOT_TO_PERP_MAP = Object.fromEntries(
  * @returns {string} SPOT symbol (e.g., 'UBTC', 'UETH', 'USOL')
  */
 export function perpToSpot(perpSymbol) {
-  return PERP_TO_SPOT_MAP[perpSymbol] || perpSymbol;
+  return HyperliquidConnector.perpToSpot(perpSymbol);
 }
 
 /**
@@ -34,7 +15,7 @@ export function perpToSpot(perpSymbol) {
  * @returns {string} PERP symbol (e.g., 'BTC', 'ETH', 'SOL')
  */
 export function spotToPerp(spotSymbol) {
-  return SPOT_TO_PERP_MAP[spotSymbol] || spotSymbol;
+  return HyperliquidConnector.spotToPerp(spotSymbol);
 }
 
 /**
@@ -69,7 +50,7 @@ export function hasDifferentSymbols(symbol) {
  * @returns {Array<string>} Array of PERP symbols
  */
 export function getAllPerpSymbols() {
-  return Object.keys(PERP_TO_SPOT_MAP);
+  return Object.keys(HyperliquidConnector.PERP_TO_SPOT_MAP);
 }
 
 /**
@@ -77,7 +58,7 @@ export function getAllPerpSymbols() {
  * @returns {Array<string>} Array of SPOT symbols
  */
 export function getAllSpotSymbols() {
-  return Object.values(PERP_TO_SPOT_MAP);
+  return Object.values(HyperliquidConnector.PERP_TO_SPOT_MAP);
 }
 
 /**
@@ -86,8 +67,8 @@ export function getAllSpotSymbols() {
  */
 export function getMappings() {
   return {
-    perpToSpot: { ...PERP_TO_SPOT_MAP },
-    spotToPerp: { ...SPOT_TO_PERP_MAP }
+    perpToSpot: { ...HyperliquidConnector.PERP_TO_SPOT_MAP },
+    spotToPerp: { ...HyperliquidConnector.SPOT_TO_PERP_MAP }
   };
 }
 
@@ -97,8 +78,7 @@ export function getMappings() {
  * @param {string} spotSymbol - SPOT symbol
  */
 export function addMapping(perpSymbol, spotSymbol) {
-  PERP_TO_SPOT_MAP[perpSymbol] = spotSymbol;
-  SPOT_TO_PERP_MAP[spotSymbol] = perpSymbol;
+  HyperliquidConnector.configureSymbolMapping({ perpToSpot: { [perpSymbol]: spotSymbol } });
 }
 
 /**

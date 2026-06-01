@@ -45,6 +45,10 @@ export async function getMarketData(hyperliquid, symbols, config, options = {}) 
     getPredictedFundingRates(hyperliquid, { verbose: false })
   ]);
 
+  if (predictedFundingRates.size === 0) {
+    console.warn('[Market Data] Predicted funding returned no usable HlPerp rates; symbols will rely on finite historical fallback only.');
+  }
+
   // Convert volumes to USDC
   const volumesUSDC = await convertVolumesToUSDC(hyperliquid, volumes);
 
@@ -200,6 +204,20 @@ export function filterOpportunities(marketData, thresholds) {
     // Filter by PERP-SPOT spread
     const perpSpotSpreadPct = Math.abs(perpSpot.spreadPercent);
 
+    if (!isFiniteNumber(perpSpotSpreadPct) ||
+        !isFiniteNumber(perpSpot.perpMid) ||
+        !isFiniteNumber(perpSpot.spotMid)) {
+      rejected.missingData.push({
+        symbol,
+        missing: [
+          !isFiniteNumber(perpSpotSpreadPct) && 'perpSpotSpread',
+          !isFiniteNumber(perpSpot.perpMid) && 'perpSpotPerpMid',
+          !isFiniteNumber(perpSpot.spotMid) && 'perpSpotSpotMid'
+        ].filter(Boolean)
+      });
+      continue;
+    }
+
     if (perpSpotSpreadPct > maxPerpSpotSpreadPercent) {
       rejected.perpSpotSpread.push({
         symbol,
@@ -211,6 +229,19 @@ export function filterOpportunities(marketData, thresholds) {
 
     // Filter by volume (combined PERP + SPOT)
     const totalVolumeUSDC = volume.perpVolUSDC + volume.spotVolUSDC;
+
+    if (!isFiniteNumber(volume.perpVolUSDC) ||
+        !isFiniteNumber(volume.spotVolUSDC) ||
+        !isFiniteNumber(totalVolumeUSDC)) {
+      rejected.missingData.push({
+        symbol,
+        missing: [
+          !isFiniteNumber(volume.perpVolUSDC) && 'perpVolume',
+          !isFiniteNumber(volume.spotVolUSDC) && 'spotVolume'
+        ].filter(Boolean)
+      });
+      continue;
+    }
 
     if (totalVolumeUSDC < minVolumeUSDC) {
       rejected.volume.push({
@@ -225,9 +256,22 @@ export function filterOpportunities(marketData, thresholds) {
     // Use predicted rate if available, otherwise fall back to historical average
     const predictedRate = predictedFunding?.predictedAnnualizedRate;
     const avgFundingRate = funding.history?.avg?.annualized ?? funding.annualizedRate;
+    const hasPredictedRate = predictedRate !== null && predictedRate !== undefined;
+
+    if ((hasPredictedRate && !isFiniteNumber(predictedRate)) || !isFiniteNumber(avgFundingRate)) {
+      rejected.funding.push({
+        symbol,
+        predictedFunding: hasPredictedRate && isFiniteNumber(predictedRate) ? predictedRate * 100 : null,
+        avgFunding: isFiniteNumber(avgFundingRate) ? avgFundingRate * 100 : null,
+        usedForFilter: null,
+        threshold: minFundingRatePercent,
+        error: 'non-finite funding'
+      });
+      continue;
+    }
 
     // For filtering, use predicted rate (what we'll actually earn)
-    const filterFundingRate = predictedRate !== null && predictedRate !== undefined ? predictedRate : avgFundingRate;
+    const filterFundingRate = hasPredictedRate ? predictedRate : avgFundingRate;
     const filterFundingPercent = filterFundingRate * 100;
 
     if (filterFundingPercent < minFundingRatePercent) {
@@ -381,7 +425,7 @@ export function formatOpportunityReport(filterResult, rankedOpportunities) {
     return lines.join('\n');
   }
 
-  lines.push(`Top ${Math.min(3, rankedOpportunities.length)} Opportunities (ranked by 7-day avg funding):`);
+  lines.push(`Top ${Math.min(3, rankedOpportunities.length)} Opportunities (ranked by primary funding):`);
   lines.push('');
 
   for (let i = 0; i < Math.min(3, rankedOpportunities.length); i++) {
@@ -390,6 +434,7 @@ export function formatOpportunityReport(filterResult, rankedOpportunities) {
 
     lines.push(`${rank}. ${opp.symbol}:`);
     lines.push(`   Avg Funding: ${(opp.avgFundingPercent).toFixed(2)}% APY`);
+    lines.push(`   Predicted Funding: ${opp.predictedFundingPercent !== null ? opp.predictedFundingPercent.toFixed(2) : 'N/A'}% APY`);
     lines.push(`   Current Funding: ${(opp.funding.annualizedRate * 100).toFixed(2)}% APY`);
     lines.push(`   Volume: $${(opp.totalVolumeUSDC / 1e6).toFixed(1)}M`);
     lines.push(`   Max Bid-Ask: ${(opp.maxBidAskSpread).toFixed(3)}%`);

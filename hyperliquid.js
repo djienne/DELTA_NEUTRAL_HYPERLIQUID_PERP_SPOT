@@ -5,6 +5,7 @@ import { SlidingWindowRateLimiter } from './utils/rate-limiter.js';
 import { ethers } from 'ethers';
 import dotenv from 'dotenv';
 import { encode as msgpackEncode } from '@msgpack/msgpack';
+import { UnknownOrderOutcomeError } from './utils/order-fill.js';
 
 dotenv.config();
 
@@ -55,10 +56,15 @@ class HyperliquidConnector extends EventEmitter {
     this.useRestFallback = false;
     this.restPollInterval = options.restPollInterval || 1000;
     this.restPollTimer = null;
+    this.fallbackReconnectInterval = options.fallbackReconnectInterval || 60000;
+    this.fallbackReconnectTimer = null;
 
     // Staleness monitoring for automatic REST fallback
     this.stalenessThreshold = options.stalenessThreshold || 60000; // 60 seconds
     this.stalenessTimer = null;
+    this.maxOrderbookAgeMs = options.maxOrderbookAgeMs || 10000;
+    this.infoTimeoutMs = options.infoTimeoutMs || 15000;
+    this.orderTimeoutMs = options.orderTimeoutMs || 20000;
 
     // Periodic REST refresh (every 5s) to supplement WebSocket
     this.restRefreshInterval = options.restRefreshInterval || 5000; // 5 seconds
@@ -98,6 +104,10 @@ class HyperliquidConnector extends EventEmitter {
     const now = Date.now();
     this.lastNonce = Math.max(now, this.lastNonce + 1);
     return this.lastNonce;
+  }
+
+  generateCloid() {
+    return ethers.hexlify(ethers.randomBytes(16));
   }
 
   /**
@@ -235,23 +245,82 @@ class HyperliquidConnector extends EventEmitter {
     return payload;
   }
 
+  async fetchJsonWithTimeout(url, requestOptions, options = {}) {
+    const {
+      timeoutMs = this.infoTimeoutMs,
+      unknownOnTimeout = false,
+      context = {}
+    } = options;
+    const controller = new AbortController();
+    let timeoutId;
+
+    try {
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();
+          const error = new Error(`REST request timed out after ${timeoutMs}ms`);
+          error.name = 'AbortError';
+          reject(error);
+        }, timeoutMs);
+      });
+
+      const response = await Promise.race([
+        this.fetch(url, {
+          ...requestOptions,
+          signal: controller.signal
+        }),
+        timeoutPromise
+      ]);
+
+      if (!response.ok) {
+        const errorText = typeof response.text === 'function'
+          ? await response.text()
+          : response.statusText;
+        throw new Error(`HTTP ${response.status}: ${errorText || response.statusText}`);
+      }
+
+      try {
+        return await response.json();
+      } catch (error) {
+        if (unknownOnTimeout) {
+          throw new UnknownOrderOutcomeError(
+            `Order response was not valid JSON: ${error.message}`,
+            context
+          );
+        }
+        throw new Error(`Invalid JSON response: ${error.message}`);
+      }
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        if (unknownOnTimeout) {
+          throw new UnknownOrderOutcomeError(
+            `Order request timed out after ${timeoutMs}ms`,
+            context
+          );
+        }
+        throw new Error(`REST request timed out after ${timeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
   async infoRequest(payload, weight = 2) {
     await this.restRateLimiter.waitForSlot(weight);
 
-    const response = await this.fetch(this.restUrl, {
+    return await this.fetchJsonWithTimeout(this.restUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(payload)
+    }, {
+      timeoutMs: this.infoTimeoutMs,
+      context: { requestType: payload?.type || 'info' }
     });
-
-    if (!response.ok) {
-      const errorText = typeof response.text === 'function' ? await response.text() : response.statusText;
-      throw new Error(`HTTP ${response.status}: ${errorText || response.statusText}`);
-    }
-
-    return await response.json();
   }
 
   /**
@@ -475,7 +544,9 @@ class HyperliquidConnector extends EventEmitter {
       this.pendingRequests.set(id, {
         resolve,
         reject,
-        timeout: timeoutId
+        timeout: timeoutId,
+        kind: 'info',
+        context: { requestType: 'l2Book', coin }
       });
 
       // Send request
@@ -548,7 +619,9 @@ class HyperliquidConnector extends EventEmitter {
       this.pendingRequests.set(id, {
         resolve,
         reject,
-        timeout: timeoutId
+        timeout: timeoutId,
+        kind: 'info',
+        context: { requestType: 'clearinghouseState', user: user || this.wallet }
       });
 
       // Send request
@@ -797,7 +870,9 @@ class HyperliquidConnector extends EventEmitter {
     if (this.reconnectAttempts > this.maxReconnectAttempts) {
       console.error('[Hyperliquid] Max reconnect attempts reached, switching to REST fallback');
       this.useRestFallback = true;
+      this.reconnecting = false;
       this.startRestPolling();
+      this.startFallbackReconnectProbe();
       this.emit('fallback', 'rest');
       return;
     }
@@ -851,6 +926,36 @@ class HyperliquidConnector extends EventEmitter {
     this.orderbooks.delete(coin);
   }
 
+  startFallbackReconnectProbe() {
+    if (this.fallbackReconnectTimer || this.intentionalDisconnect) {
+      return;
+    }
+
+    this.fallbackReconnectTimer = setInterval(async () => {
+      if (this.intentionalDisconnect || this.connected || this.reconnecting) {
+        return;
+      }
+
+      try {
+        console.log('[Hyperliquid] Probing WebSocket recovery from REST fallback');
+        this.reconnectAttempts = 0;
+        await this.connect();
+        this.useRestFallback = false;
+        this.stopRestPolling();
+        this.stopFallbackReconnectProbe();
+      } catch (error) {
+        console.error('[Hyperliquid] WebSocket recovery probe failed:', error.message);
+      }
+    }, this.fallbackReconnectInterval);
+  }
+
+  stopFallbackReconnectProbe() {
+    if (this.fallbackReconnectTimer) {
+      clearInterval(this.fallbackReconnectTimer);
+      this.fallbackReconnectTimer = null;
+    }
+  }
+
   /**
    * Disconnect from Hyperliquid
    */
@@ -861,6 +966,7 @@ class HyperliquidConnector extends EventEmitter {
     this.reconnecting = false;
     this.stopHealthMonitoring();
     this.stopRestPolling();
+    this.stopFallbackReconnectProbe();
     this.stopPeriodicRestRefresh();
     this.stopStalenessMonitoring();
 
@@ -872,6 +978,19 @@ class HyperliquidConnector extends EventEmitter {
     this.connected = false;
     this.subscriptions.clear();
     this.orderbooks.clear();
+    for (const [id, pending] of this.pendingRequests.entries()) {
+      if (pending.timeout) {
+        clearTimeout(pending.timeout);
+      }
+      if (pending.kind === 'order') {
+        pending.reject(new UnknownOrderOutcomeError('Disconnected while order request was pending; reconcile on-chain before retrying', {
+          ...(pending.context || {}),
+          requestId: id
+        }));
+      } else {
+        pending.reject(new Error('Disconnected while request was pending'));
+      }
+    }
     this.pendingRequests.clear();
   }
 
@@ -1046,6 +1165,16 @@ class HyperliquidConnector extends EventEmitter {
     'HYPE': 'HYPE'
   };
 
+  static configureSymbolMapping(symbolMapping = {}) {
+    const perpToSpot = symbolMapping.perpToSpot || symbolMapping || {};
+    for (const [perp, spot] of Object.entries(perpToSpot)) {
+      if (typeof perp === 'string' && typeof spot === 'string' && perp && spot) {
+        HyperliquidConnector.PERP_TO_SPOT_MAP[perp] = spot;
+        HyperliquidConnector.SPOT_TO_PERP_MAP[spot] = perp;
+      }
+    }
+  }
+
   /**
    * Convert perp symbol to spot symbol
    * @param {string} perpSymbol - Perp market symbol (e.g., 'ETH', 'SOL', 'PUMP')
@@ -1160,17 +1289,19 @@ class HyperliquidConnector extends EventEmitter {
   roundPrice(price, szDecimals, isSpot = false) {
     const MAX_DECIMALS = isSpot ? 8 : 6;
     const decimalsAllowed = MAX_DECIMALS - szDecimals;
+    const numericPrice = Number(price);
+
+    if (!Number.isFinite(numericPrice) || numericPrice <= 0) {
+      throw new Error(`Invalid price: ${price}`);
+    }
 
     // Step 1: Round to 5 significant figures
-    let rounded = parseFloat(price.toPrecision(5));
+    let rounded = Number(numericPrice.toPrecision(5));
 
     // Step 2: Limit to decimalsAllowed decimal places
-    rounded = parseFloat(rounded.toFixed(decimalsAllowed));
+    let priceStr = rounded.toFixed(Math.max(0, decimalsAllowed));
 
-    // Step 3: Convert to string and remove trailing zeros
-    let priceStr = rounded.toString();
-
-    // Remove trailing zeros after decimal point
+    // Step 3: Remove trailing zeros without switching to exponential notation
     if (priceStr.includes('.')) {
       priceStr = priceStr.replace(/\.?0+$/, '');
     }
@@ -1183,12 +1314,29 @@ class HyperliquidConnector extends EventEmitter {
    * - Rounded to multiples of 10^-szDecimals
    * - Formatted with at most szDecimals decimal places
    */
-  roundSize(size, szDecimals) {
+  roundSize(size, szDecimals, mode = 'nearest') {
+    const numericSize = Number(size);
+    if (!Number.isFinite(numericSize) || numericSize <= 0) {
+      throw new Error(`Invalid size: ${size}`);
+    }
+
     // Size tick = 10^-szDecimals
     const sizeTick = Math.pow(10, -szDecimals);
 
-    // Round to nearest multiple of sizeTick
-    const rounded = Math.round(size / sizeTick) * sizeTick;
+    const units = numericSize / sizeTick;
+    let roundedUnits;
+    if (mode === 'down') {
+      roundedUnits = Math.floor(units);
+    } else if (mode === 'up') {
+      roundedUnits = Math.ceil(units);
+    } else {
+      roundedUnits = Math.round(units);
+    }
+
+    const rounded = roundedUnits * sizeTick;
+    if (rounded <= 0) {
+      throw new Error(`Rounded size is zero for ${size} with szDecimals ${szDecimals}`);
+    }
 
     // Format with at most szDecimals decimal places
     let sizeStr = rounded.toFixed(szDecimals);
@@ -1314,6 +1462,24 @@ class HyperliquidConnector extends EventEmitter {
     return hash;
   }
 
+  normalizeSlippagePercent(slippagePercent = 5) {
+    const value = Number(slippagePercent);
+    if (!Number.isFinite(value) || value < 0 || value >= 100) {
+      throw new Error(`Invalid slippage percent: ${slippagePercent}`);
+    }
+    return value / 100;
+  }
+
+  async refreshOrderbookSnapshot(coin) {
+    const data = await this.requestL2BookRest(coin);
+    this.updateOrderbook({
+      coin,
+      levels: data.levels,
+      time: data.time || Date.now()
+    });
+    return this.getBidAsk(coin);
+  }
+
   /**
    * Create a market order
    * For Hyperliquid, market orders are IOC (Immediate or Cancel) limit orders with aggressive pricing
@@ -1339,28 +1505,37 @@ class HyperliquidConnector extends EventEmitter {
 
     const isBuy = side === 'buy';
     const reduceOnly = isSpot ? false : (options.reduceOnly || false);
-    const slippage = options.slippage !== undefined ? options.slippage : 0.05; // Default 5% slippage
+    const slippagePercent = options.slippagePercent !== undefined
+      ? options.slippagePercent
+      : (options.slippage !== undefined ? options.slippage : 5);
+    const slippageDecimal = this.normalizeSlippagePercent(slippagePercent);
 
     let midPrice;
     if (options.overrideMidPrice && Number.isFinite(options.overrideMidPrice)) {
       midPrice = options.overrideMidPrice;
-      console.log(`[Hyperliquid] ℹ️ Using provided override mid-price: ${midPrice}`);
+      console.log(`[Hyperliquid] Using provided override mid-price: ${midPrice}`);
     } else {
-      // Use cached prices from the REST poller
+      const maxOrderbookAgeMs = options.maxOrderbookAgeMs ?? this.maxOrderbookAgeMs;
       let bidAsk = this.getBidAsk(orderbookCoin);
 
       if (!bidAsk || !bidAsk.bid || !bidAsk.ask) {
-        // If cache is empty, wait a moment and retry once. This can happen on startup.
         await new Promise(resolve => setTimeout(resolve, 500));
         bidAsk = this.getBidAsk(orderbookCoin);
         if (!bidAsk || !bidAsk.bid || !bidAsk.ask) {
-          throw new Error(`No cached orderbook data available for ${coin} to create market order.`);
+          bidAsk = await this.refreshOrderbookSnapshot(orderbookCoin);
         }
       }
-      
-      console.log(`[Hyperliquid] ℹ️ Using cached prices (age: ${Date.now() - bidAsk.timestamp}ms): bid=${bidAsk.bid}, ask=${bidAsk.ask}`);
 
-      // Calculate mid price
+      if (Date.now() - bidAsk.timestamp > maxOrderbookAgeMs) {
+        console.warn(`[Hyperliquid] Cached orderbook for ${coin} is stale (${Date.now() - bidAsk.timestamp}ms), refreshing via REST`);
+        bidAsk = await this.refreshOrderbookSnapshot(orderbookCoin);
+      }
+
+      if (!bidAsk || !Number.isFinite(bidAsk.bid) || !Number.isFinite(bidAsk.ask) || bidAsk.bid <= 0 || bidAsk.ask <= 0) {
+        throw new Error(`No fresh orderbook data available for ${coin} to create market order.`);
+      }
+
+      console.log(`[Hyperliquid] Using prices (age: ${Date.now() - bidAsk.timestamp}ms): bid=${bidAsk.bid}, ask=${bidAsk.ask}`);
       midPrice = (bidAsk.bid + bidAsk.ask) / 2;
     }
 
@@ -1368,8 +1543,7 @@ class HyperliquidConnector extends EventEmitter {
     // - For buy: midPrice * (1 + slippage)
     // - For sell: midPrice * (1 - slippage)
     // IOC ensures immediate execution at best available price
-    // Note: slippage is expected as a decimal (e.g., 0.05 for 5%)
-    const slippageDecimal = slippage > 1 ? slippage / 100 : slippage;
+    // Note: slippageDecimal is normalized from a percent input (e.g., 5 for 5%)
     let limitPrice;
     if (isBuy) {
       limitPrice = midPrice * (1 + slippageDecimal);
@@ -1382,7 +1556,7 @@ class HyperliquidConnector extends EventEmitter {
     const limitPriceStr = this.roundPrice(limitPrice, assetInfo.szDecimals, isSpot);
 
     // Round size to proper lot size (szDecimals)
-    const sizeStr = this.roundSize(size, assetInfo.szDecimals);
+    const sizeStr = this.roundSize(size, assetInfo.szDecimals, options.sizeRoundingMode || 'nearest');
 
     // Check minimum notional ($10 minimum per Hyperliquid docs)
     const notional = parseFloat(limitPriceStr) * parseFloat(sizeStr);
@@ -1390,8 +1564,8 @@ class HyperliquidConnector extends EventEmitter {
       throw new Error(`Order notional ($${notional.toFixed(2)}) is below minimum ($10). Increase order size.`);
     }
 
-    console.log(`[Hyperliquid] Market order ${side} ${sizeStr} ${coin} at limit ${limitPriceStr} (mid: ${midPrice.toFixed(6)}, notional: $${notional.toFixed(2)}, slippage: ${slippage * 100}%, szDecimals: ${assetInfo.szDecimals})`);
-    console.log(`[Hyperliquid] Price calculation: ${midPrice} * ${1 + (isBuy ? slippage : -slippage)} = ${limitPrice} -> rounded: ${limitPriceStr}`);
+    console.log(`[Hyperliquid] Market order ${side} ${sizeStr} ${coin} at limit ${limitPriceStr} (mid: ${midPrice.toFixed(6)}, notional: $${notional.toFixed(2)}, slippage: ${slippagePercent}%, szDecimals: ${assetInfo.szDecimals})`);
+    console.log(`[Hyperliquid] Price calculation: ${midPrice} * ${1 + (isBuy ? slippageDecimal : -slippageDecimal)} = ${limitPrice} -> rounded: ${limitPriceStr}`);
 
     // Construct order
     const order = {
@@ -1407,8 +1581,9 @@ class HyperliquidConnector extends EventEmitter {
       }
     };
 
-    if (options.cloid) {
-      order.c = this.validateCloid(options.cloid);
+    const cloid = options.cloid === false ? null : this.validateCloid(options.cloid || this.generateCloid());
+    if (cloid) {
+      order.c = cloid;
     }
 
     const action = {
@@ -1420,19 +1595,28 @@ class HyperliquidConnector extends EventEmitter {
     console.log(`[Hyperliquid] Order object:`, JSON.stringify(order, null, 2));
 
     const nonce = this.nextNonce();
+    const orderContext = {
+      coin,
+      side,
+      size: parseFloat(sizeStr),
+      isSpot,
+      reduceOnly,
+      cloid,
+      nonce
+    };
 
     // Try WebSocket first if connected, otherwise use REST
     if (this.connected && !options.useRest) {
-      return await this.createOrderWebSocket(action, nonce, options.vaultAddress, options.expiresAfter);
+      return await this.createOrderWebSocket(action, nonce, options.vaultAddress, options.expiresAfter, orderContext);
     } else {
-      return await this.createOrderRest(action, nonce, options.vaultAddress, options.expiresAfter);
+      return await this.createOrderRest(action, nonce, options.vaultAddress, options.expiresAfter, orderContext);
     }
   }
 
   /**
    * Create order via WebSocket
    */
-  async createOrderWebSocket(action, nonce, vaultAddress = null, expiresAfter = null) {
+  async createOrderWebSocket(action, nonce, vaultAddress = null, expiresAfter = null, context = {}) {
     if (!this.connected) {
       throw new Error('Not connected to WebSocket');
     }
@@ -1469,14 +1653,24 @@ class HyperliquidConnector extends EventEmitter {
       const timeoutId = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
-          reject(new Error('Request timeout'));
+          reject(new UnknownOrderOutcomeError('WebSocket order request timed out; reconcile on-chain before retrying', {
+            ...context,
+            nonce,
+            requestId: id
+          }));
         }
       }, 10000);
 
       this.pendingRequests.set(id, {
         resolve,
         reject,
-        timeout: timeoutId
+        timeout: timeoutId,
+        kind: 'order',
+        context: {
+          ...context,
+          nonce,
+          requestId: id
+        }
       });
 
       // Send request
@@ -1496,7 +1690,7 @@ class HyperliquidConnector extends EventEmitter {
   /**
    * Create order via REST API
    */
-  async createOrderRest(action, nonce, vaultAddress = null, expiresAfter = null) {
+  async createOrderRest(action, nonce, vaultAddress = null, expiresAfter = null, context = {}) {
     const signature = await this.signAction(action, nonce, vaultAddress, expiresAfter);
 
     const payload = {
@@ -1514,20 +1708,17 @@ class HyperliquidConnector extends EventEmitter {
     }
 
     try {
-      const response = await this.fetch(this.exchangeUrl, {
+      const result = await this.fetchJsonWithTimeout(this.exchangeUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(payload)
+      }, {
+        timeoutMs: this.orderTimeoutMs,
+        unknownOnTimeout: true,
+        context: { ...context, nonce, transport: 'rest' }
       });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
-      }
-
-      const result = await response.json();
       console.log('[Hyperliquid] Order placed via REST:', result);
       return result;
     } catch (error) {

@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { ethers } from 'ethers';
 import HyperliquidConnector from '../../hyperliquid.js';
+import { UnknownOrderOutcomeError } from '../../utils/order-fill.js';
 
 class FakeWebSocket extends EventEmitter {
   constructor() {
@@ -236,4 +237,102 @@ test('nextNonce is strictly monotonic within the same millisecond', () => {
   } finally {
     Date.now = originalNow;
   }
+});
+
+test('REST info requests time out instead of hanging forever', async () => {
+  const connector = new HyperliquidConnector({
+    wallet: '0x0',
+    privateKey: null,
+    infoTimeoutMs: 5,
+    fetch: async () => new Promise(() => {})
+  });
+  connector.restRateLimiter.waitForSlot = async () => {};
+
+  await assert.rejects(
+    () => connector.infoRequest({ type: 'meta' }, 1),
+    /timed out/
+  );
+});
+
+test('REST order parse failure is treated as unknown outcome', async () => {
+  const connector = new HyperliquidConnector({
+    wallet: '0x0000000000000000000000000000000000000001',
+    privateKey: `0x${'1'.repeat(64)}`,
+    fetch: async () => ({
+      ok: true,
+      json: async () => {
+        throw new Error('not json');
+      }
+    })
+  });
+
+  const action = { type: 'order', orders: [], grouping: 'na' };
+
+  await assert.rejects(
+    () => connector.createOrderRest(action, 123, null, null, { coin: 'BTC' }),
+    UnknownOrderOutcomeError
+  );
+});
+
+test('disconnect rejects pending order requests as unknown outcomes', async () => {
+  const connector = new HyperliquidConnector({
+    wallet: '0x0000000000000000000000000000000000000001',
+    privateKey: `0x${'1'.repeat(64)}`
+  });
+  connector.connected = true;
+  connector.ws = new FakeWebSocket();
+
+  const action = {
+    type: 'order',
+    orders: [{ a: 0, b: true, p: '100', s: '1', r: false, t: { limit: { tif: 'Ioc' } } }],
+    grouping: 'na'
+  };
+  const pending = connector.createOrderWebSocket(action, 123, null, null, { coin: 'BTC' });
+  await new Promise(resolve => setImmediate(resolve));
+  connector.disconnect();
+
+  await assert.rejects(pending, UnknownOrderOutcomeError);
+});
+
+test('createMarketOrder refreshes stale orderbook before pricing', async () => {
+  const connector = new HyperliquidConnector({
+    wallet: '0x0000000000000000000000000000000000000001',
+    privateKey: `0x${'1'.repeat(64)}`,
+    maxOrderbookAgeMs: 1
+  });
+  let refreshed = false;
+
+  connector.getAssetId = async () => 0;
+  connector.getAssetInfo = () => ({ szDecimals: 4 });
+  connector.getCoinForOrderbook = () => 'BTC';
+  connector.createOrderRest = async (action) => action;
+  connector.updateOrderbook({
+    coin: 'BTC',
+    levels: [
+      [{ px: '90', sz: '1', n: 1 }],
+      [{ px: '110', sz: '1', n: 1 }]
+    ],
+    time: Date.now() - 10000
+  });
+  connector.requestL2BookRest = async () => {
+    refreshed = true;
+    return {
+      levels: [
+        [{ px: '99', sz: '1', n: 1 }],
+        [{ px: '101', sz: '1', n: 1 }]
+      ],
+      time: Date.now()
+    };
+  };
+
+  const action = await connector.createMarketOrder('BTC', 'buy', 1, { useRest: true, cloid: false });
+
+  assert.equal(refreshed, true);
+  assert.equal(action.orders[0].p, '105');
+});
+
+test('roundPrice avoids exponential notation', () => {
+  const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
+
+  assert.equal(connector.roundPrice(0.000012345, 2, true).includes('e'), false);
 });

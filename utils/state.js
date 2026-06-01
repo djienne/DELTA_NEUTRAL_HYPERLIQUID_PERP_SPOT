@@ -20,10 +20,13 @@ export function getStateFilePath() {
 const DEFAULT_STATE = {
   version: '1.0',
   position: null,  // Current position, or null if no position
+  pendingIntent: null,
   lastCheckTime: null,
   lastOpportunityCheck: null,
   history: []  // Historical positions
 };
+
+const DEFAULT_MAX_HISTORY = 500;
 
 function compactOrderResult(result) {
   const status = result?.response?.data?.statuses?.[0] || {};
@@ -65,8 +68,8 @@ function compactPositionData(positionData) {
  * @returns {Object} State object
  */
 export function loadState() {
+  const stateFile = getStateFilePath();
   try {
-    const stateFile = getStateFilePath();
     if (fs.existsSync(stateFile)) {
       const data = fs.readFileSync(stateFile, 'utf8');
       const state = JSON.parse(data);
@@ -79,6 +82,15 @@ export function loadState() {
     }
   } catch (error) {
     console.error('[State] Error loading state:', error.message);
+    if (fs.existsSync(stateFile)) {
+      const corruptPath = `${stateFile}.corrupt-${Date.now()}`;
+      try {
+        fs.renameSync(stateFile, corruptPath);
+        console.error(`[State] Corrupt state moved to ${corruptPath}`);
+      } catch (renameError) {
+        console.error('[State] Failed to quarantine corrupt state:', renameError.message);
+      }
+    }
   }
 
   // Return default state if file doesn't exist or error occurred
@@ -98,7 +110,30 @@ export function saveState(state) {
       fs.mkdirSync(stateDir, { recursive: true });
     }
 
-    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf8');
+    const tmpFile = `${stateFile}.tmp-${process.pid}-${Date.now()}`;
+    const data = JSON.stringify(state, null, 2);
+    const fd = fs.openSync(tmpFile, 'w');
+    try {
+      fs.writeFileSync(fd, data, 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    fs.renameSync(tmpFile, stateFile);
+
+    if (stateDir && stateDir !== '.') {
+      try {
+        const dirFd = fs.openSync(stateDir, 'r');
+        try {
+          fs.fsyncSync(dirFd);
+        } finally {
+          fs.closeSync(dirFd);
+        }
+      } catch {
+        // Directory fsync is best-effort on Windows.
+      }
+    }
   } catch (error) {
     console.error('[State] Error saving state:', error.message);
     throw error;
@@ -132,14 +167,32 @@ export function hasPosition(state) {
 export function recordPosition(state, positionData) {
   const position = {
     ...compactPositionData(positionData),
-    openTime: Date.now(),
+    openTime: positionData.openTime || Date.now(),
     lastCheckTime: Date.now()
   };
 
   return {
     ...state,
     position: position,
+    pendingIntent: null,
     lastOpportunityCheck: Date.now()
+  };
+}
+
+export function setPendingIntent(state, intent) {
+  return {
+    ...state,
+    pendingIntent: {
+      ...intent,
+      createdAt: intent.createdAt || Date.now()
+    }
+  };
+}
+
+export function clearPendingIntent(state) {
+  return {
+    ...state,
+    pendingIntent: null
   };
 }
 
@@ -181,7 +234,8 @@ export function closePosition(state, closeData) {
   return {
     ...state,
     position: null,
-    history: [...state.history, historicalPosition],
+    pendingIntent: null,
+    history: [...state.history, historicalPosition].slice(-(state.maxHistory || DEFAULT_MAX_HISTORY)),
     lastCheckTime: Date.now()
   };
 }

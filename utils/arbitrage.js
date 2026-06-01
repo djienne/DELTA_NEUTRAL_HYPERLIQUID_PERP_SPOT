@@ -33,7 +33,7 @@ export async function fetchWithConcurrencyLimit(tasks, limit = 10, delayBetweenB
  * @returns {number} Spread percentage (e.g., 0.25 for 0.25%)
  */
 function calculatePerpSpotSpreadPercent(perpMid, spotMid) {
-  if (perpMid <= 0 || spotMid <= 0) return null;
+  if (!Number.isFinite(perpMid) || !Number.isFinite(spotMid) || perpMid <= 0 || spotMid <= 0) return null;
   const spread = ((spotMid - perpMid) / perpMid) * 100;
   return spread;
 }
@@ -57,11 +57,11 @@ async function getSinglePerpSpotSpread(hyperliquid, perpSymbol, priceMap) {
     const spotCoin = hyperliquid.getCoinForOrderbook(spotSymbol, spotAssetId);
     const spotMid = priceMap[spotCoin];
 
-    if (perpMid === undefined || perpMid === null) {
+    if (!Number.isFinite(perpMid)) {
       throw new Error(`No price data for PERP ${perpSymbol}`);
     }
 
-    if (spotMid === undefined || spotMid === null) {
+    if (!Number.isFinite(spotMid)) {
       throw new Error(`No price data for SPOT ${spotSymbol} (coin: ${spotCoin})`);
     }
 

@@ -292,12 +292,20 @@ export async function getPredictedFundingRates(hyperliquid, options = {}) {
 
       if (hlPerpData && hlPerpData[1]) {
         const { fundingRate, nextFundingTime } = hlPerpData[1];
+        const parsedFundingRate = parseFloat(fundingRate);
+
+        if (!Number.isFinite(parsedFundingRate)) {
+          if (verbose) {
+            console.warn(`Skipping ${coin}: invalid predicted funding rate ${fundingRate}`);
+          }
+          continue;
+        }
 
         fundingMap.set(coin, {
           symbol: coin,
-          predictedFundingRate: parseFloat(fundingRate),
-          // Annualize: hourly rate × 24 hours × 365 days
-          predictedAnnualizedRate: parseFloat(fundingRate) * 24 * 365,
+          predictedFundingRate: parsedFundingRate,
+          // Annualize: hourly rate x 24 hours x 365 days
+          predictedAnnualizedRate: parsedFundingRate * 24 * 365,
           nextFundingTime: nextFundingTime,
           nextFundingDate: new Date(nextFundingTime)
         });

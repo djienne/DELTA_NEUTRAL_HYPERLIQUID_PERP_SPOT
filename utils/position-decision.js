@@ -10,8 +10,7 @@ export function getCurrentPositionFundingSignal(position, analysis) {
 
   if (currentSymbolOpp) {
     const fundingType =
-      currentSymbolOpp.predictedFundingPercent !== null &&
-      currentSymbolOpp.predictedFundingPercent !== undefined
+      Number.isFinite(currentSymbolOpp.predictedFundingPercent)
         ? 'predicted'
         : 'avg';
 
@@ -40,7 +39,7 @@ export function getCurrentPositionFundingSignal(position, analysis) {
   const predictedFunding = rawPredictedData?.predictedAnnualizedRate;
   const avgFunding = rawFundingData.history?.avg?.annualized ?? rawFundingData.annualizedRate;
   const fundingRate =
-    predictedFunding !== null && predictedFunding !== undefined
+    Number.isFinite(predictedFunding)
       ? predictedFunding
       : avgFunding;
 
@@ -59,7 +58,7 @@ export function getCurrentPositionFundingSignal(position, analysis) {
     fundingRate,
     fundingPercent: fundingRate * 100,
     fundingType:
-      predictedFunding !== null && predictedFunding !== undefined
+      Number.isFinite(predictedFunding)
         ? 'predicted'
         : 'avg',
     rawFundingData,

@@ -1,11 +1,32 @@
 import HyperliquidConnector from '../hyperliquid.js';
 import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral } from './positions.js';
+import { assertCompleteFill } from './order-fill.js';
+import { getMinFillRatio } from './risk.js';
 
 /**
  * Hedge Utility Functions
  *
  * Detect and correct unhedged positions by creating matching opposite positions
  */
+
+function buildHedgeNeed(fields) {
+  return {
+    targetSymbol: null,
+    targetMarket: null,
+    targetSide: null,
+    targetSize: null,
+    fallbackCloseSymbol: null,
+    fallbackCloseMarket: null,
+    fallbackCloseSide: null,
+    fallbackCloseSize: null,
+    fallbackCloseReduceOnly: true,
+    ...fields
+  };
+}
+
+function isSpotMarket(market) {
+  return market === 'SPOT';
+}
 
 /**
  * Analyze current positions and identify what needs hedging
@@ -18,6 +39,7 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
     minValueUSD = 1,
     verbose = false,
     managedSpotSymbols = null,
+    managedPerpSymbols = null,
     maxHedgeMismatchPercent = 30
   } = options;
 
@@ -27,7 +49,7 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
 
   // Fetch current positions
   const [perpPositions, spotBalances] = await Promise.all([
-    getPerpPositions(hyperliquid, null, { verbose: false }),
+    getPerpPositions(hyperliquid, null, { verbose: false, managedPerpSymbols }),
     getSpotBalances(hyperliquid, null, { verbose: false, managedSpotSymbols })
   ]);
 
@@ -57,7 +79,7 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
         const value = perpSizeNeeded * price;
 
         if (value >= minValueUSD) {
-          hedgeNeeds.push({
+          hedgeNeeds.push(buildHedgeNeed({
             type: 'STRENGTHEN_PERP_SHORT',
             spotSymbol: HyperliquidConnector.perpToSpot(pair.symbol),
             perpSymbol: pair.symbol,
@@ -65,16 +87,74 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
             existingSpotSize: pair.spotSize,
             spotSize: pair.spotSize,
             perpSizeNeeded: perpSizeNeeded,
+            targetSymbol: pair.symbol,
+            targetMarket: 'PERP',
+            targetSide: 'sell',
+            targetSize: perpSizeNeeded,
+            fallbackCloseSymbol: HyperliquidConnector.perpToSpot(pair.symbol),
+            fallbackCloseMarket: 'SPOT',
+            fallbackCloseSide: 'sell',
+            fallbackCloseSize: perpSizeNeeded,
+            fallbackCloseReduceOnly: false,
             currentPrice: price,
             valueUSD: value,
             action: 'SELL',
             market: 'PERP',
             reason: `Strengthen WEAK hedge (${pair.sizeMismatchPct.toFixed(1)}% mismatch)`
-          });
+          }));
         }
       } else if (pair.spotSize < pair.perpSize) {
-        // Need more SPOT LONG to match PERP SHORT (but ignoring this for now)
-        // This would require buying more SPOT
+        const spotSizeNeeded = sizeDiff;
+        const value = spotSizeNeeded * price;
+
+        if (value >= minValueUSD) {
+          hedgeNeeds.push(buildHedgeNeed({
+            type: 'STRENGTHEN_SPOT_LONG',
+            spotSymbol: HyperliquidConnector.perpToSpot(pair.symbol),
+            perpSymbol: pair.symbol,
+            existingPerpSize: pair.perpSize,
+            existingSpotSize: pair.spotSize,
+            perpSize: pair.perpSize,
+            spotSizeNeeded,
+            targetSymbol: HyperliquidConnector.perpToSpot(pair.symbol),
+            targetMarket: 'SPOT',
+            targetSide: 'buy',
+            targetSize: spotSizeNeeded,
+            fallbackCloseSymbol: pair.symbol,
+            fallbackCloseMarket: 'PERP',
+            fallbackCloseSide: 'buy',
+            fallbackCloseSize: spotSizeNeeded,
+            fallbackCloseReduceOnly: true,
+            currentPrice: price,
+            valueUSD: value,
+            action: 'BUY',
+            market: 'SPOT',
+            reason: `Strengthen WEAK hedge (${pair.sizeMismatchPct.toFixed(1)}% mismatch)`
+          }));
+        }
+      }
+    } else if (!pair.isDeltaNeutral && pair.imbalanceType === 'DOUBLE_LONG') {
+      const price = priceMap[pair.symbol] || 0;
+      const value = pair.perpSize * price;
+      if (value >= minValueUSD) {
+        hedgeNeeds.push(buildHedgeNeed({
+          type: 'DOUBLE_LONG_REQUIRES_CLOSE',
+          spotSymbol: HyperliquidConnector.perpToSpot(pair.symbol),
+          perpSymbol: pair.symbol,
+          perpSide: pair.perpSide,
+          perpSize: pair.perpSize,
+          spotSize: pair.spotSize,
+          fallbackCloseSymbol: pair.symbol,
+          fallbackCloseMarket: 'PERP',
+          fallbackCloseSide: 'sell',
+          fallbackCloseSize: pair.perpSize,
+          fallbackCloseReduceOnly: true,
+          currentPrice: price,
+          valueUSD: value,
+          action: 'CLOSE',
+          market: 'PERP',
+          reason: 'Directional LONG PERP + LONG SPOT exposure requires closing the PERP leg'
+        }));
       }
     }
   }
@@ -88,18 +168,27 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
     const value = spotSize * price;
 
     if (value >= minValueUSD) {
-      hedgeNeeds.push({
+      hedgeNeeds.push(buildHedgeNeed({
         type: 'SPOT_NEEDS_PERP_SHORT',
         spotSymbol: spotPos.symbol,
         perpSymbol: perpSymbol,
         spotSize: spotSize,
         perpSizeNeeded: spotSize,
+        targetSymbol: perpSymbol,
+        targetMarket: 'PERP',
+        targetSide: 'sell',
+        targetSize: spotSize,
+        fallbackCloseSymbol: spotPos.symbol,
+        fallbackCloseMarket: 'SPOT',
+        fallbackCloseSide: 'sell',
+        fallbackCloseSize: spotSize,
+        fallbackCloseReduceOnly: false,
         currentPrice: price,
         valueUSD: value,
         action: 'SELL',
         market: 'PERP',
         reason: 'Unhedged SPOT position'
-      });
+      }));
     }
   }
 
@@ -114,19 +203,28 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
       // If we have a LONG perp, we need SHORT spot (sell)
       const needSpotBuy = perpPos.side === 'SHORT';
 
-      hedgeNeeds.push({
+      hedgeNeeds.push(buildHedgeNeed({
         type: 'PERP_NEEDS_SPOT',
         perpSymbol: perpPos.symbol,
         spotSymbol: spotSymbol,
         perpSide: perpPos.side,
         perpSize: Math.abs(perpPos.size),
         spotSizeNeeded: Math.abs(perpPos.size),
+        targetSymbol: needSpotBuy ? spotSymbol : null,
+        targetMarket: needSpotBuy ? 'SPOT' : null,
+        targetSide: needSpotBuy ? 'buy' : null,
+        targetSize: needSpotBuy ? Math.abs(perpPos.size) : null,
+        fallbackCloseSymbol: perpPos.symbol,
+        fallbackCloseMarket: 'PERP',
+        fallbackCloseSide: perpPos.side === 'LONG' ? 'sell' : 'buy',
+        fallbackCloseSize: Math.abs(perpPos.size),
+        fallbackCloseReduceOnly: true,
         currentPrice: price,
         valueUSD: value,
         action: needSpotBuy ? 'BUY' : 'SELL',
         market: 'SPOT',
         reason: `Unhedged PERP ${perpPos.side.toUpperCase()}`
-      });
+      }));
     }
   }
 
@@ -149,88 +247,123 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
 export async function createHedge(hyperliquid, hedgeNeed, config, options = {}) {
   const { verbose = false } = options;
 
-  const symbol = hedgeNeed.market === 'PERP' ? hedgeNeed.perpSymbol : hedgeNeed.spotSymbol;
-  const size = hedgeNeed.market === 'PERP' ? hedgeNeed.perpSizeNeeded : hedgeNeed.spotSizeNeeded;
-  const isSpot = hedgeNeed.market === 'SPOT';
+  if (!hedgeNeed.targetSymbol || !hedgeNeed.targetMarket || !hedgeNeed.targetSide || !hedgeNeed.targetSize) {
+    return {
+      success: false,
+      requiresClose: Boolean(hedgeNeed.fallbackCloseSymbol),
+      error: 'No safe hedge order is available for this exposure shape',
+      hedgeNeed
+    };
+  }
 
-  // Get the original position size for comparison
-  const originalSize = hedgeNeed.spotSize !== undefined ? hedgeNeed.spotSize : hedgeNeed.perpSize;
+  const symbol = hedgeNeed.targetSymbol;
+  const isSpot = isSpotMarket(hedgeNeed.targetMarket);
+  const size = hedgeNeed.targetSize;
+  const minFillRatio = getMinFillRatio(config);
 
   if (verbose) {
     console.log(`[Hedge] Creating hedge for ${symbol}:`);
     console.log(`[Hedge]   Type: ${hedgeNeed.type}`);
-    console.log(`[Hedge]   Original position: ${originalSize.toFixed(6)}`);
-    console.log(`[Hedge]   Action: ${hedgeNeed.action} ${size.toFixed(6)} ${symbol} (${hedgeNeed.market})`);
-    console.log(`[Hedge]   Value: $${hedgeNeed.valueUSD.toFixed(2)}`);
+    console.log(`[Hedge]   Action: ${hedgeNeed.targetSide.toUpperCase()} ${size.toFixed(6)} ${symbol} (${hedgeNeed.targetMarket})`);
+    console.log(`[Hedge]   Value: ${hedgeNeed.valueUSD.toFixed(2)}`);
     console.log(`[Hedge]   Reason: ${hedgeNeed.reason}`);
   }
 
   try {
-    // Get asset info for proper rounding to match the target market's lot size
     const assetId = await hyperliquid.getAssetId(symbol, isSpot);
     const assetInfo = hyperliquid.getAssetInfo(symbol, assetId);
-    const sizeRounded = parseFloat(hyperliquid.roundSize(size, assetInfo.szDecimals));
+    const sizeRounded = parseFloat(hyperliquid.roundSize(size, assetInfo.szDecimals, 'down'));
 
-    // Calculate mismatch between original and hedge
-    const mismatchAbs = Math.abs(originalSize - sizeRounded);
-    const mismatchPct = (mismatchAbs / originalSize) * 100;
-
-    if (verbose) {
-      console.log(`[Hedge]   Rounded size: ${sizeRounded} (szDecimals: ${assetInfo.szDecimals})`);
-      if (mismatchPct > 0.1) {
-        console.log(`[Hedge]   ⚠️  Size mismatch: ${mismatchPct.toFixed(3)}% (${mismatchAbs.toFixed(6)} difference due to lot size rounding)`);
-      }
-    }
-
-    // Create market order (note: no reduceOnly, we're creating new position)
-    const side = hedgeNeed.action.toLowerCase();
-    const result = await hyperliquid.createMarketOrder(symbol, side, sizeRounded, {
-      isSpot: isSpot,
+    const result = await hyperliquid.createMarketOrder(symbol, hedgeNeed.targetSide, sizeRounded, {
+      isSpot,
+      reduceOnly: false,
       slippage: config.trading?.maxSlippagePercent || 5.0,
-      overrideMidPrice: hedgeNeed.currentPrice
+      overrideMidPrice: hedgeNeed.currentPrice,
+      sizeRoundingMode: 'down'
     });
 
-    const filled = result.response?.data?.statuses?.[0]?.filled;
-
-    if (!filled) {
-      const error = result.response?.data?.statuses?.[0]?.error;
-      if (verbose) {
-        console.error(`[Hedge]   ❌ Failed: ${error || 'Unknown error'}`);
-      }
-      return {
-        success: false,
-        error: error || 'Order not filled',
-        hedgeNeed: hedgeNeed,
-        response: result.response
-      };
-    }
-
-    const fillPx = parseFloat(filled.avgPx || hedgeNeed.currentPrice);
-    const fillSz = parseFloat(filled.totalSz || sizeRounded);
+    const outcome = assertCompleteFill(result, sizeRounded, {
+      minFillRatio,
+      fallbackPrice: hedgeNeed.currentPrice,
+      context: { hedgeType: hedgeNeed.type, symbol, isSpot }
+    });
 
     if (verbose) {
-      console.log(`[Hedge]   ✅ Success: ${hedgeNeed.action} ${fillSz} @ $${fillPx.toFixed(2)}`);
+      console.log(`[Hedge]   Success: ${hedgeNeed.targetSide.toUpperCase()} ${outcome.fillSize} @ ${outcome.fillPrice.toFixed(2)}`);
     }
 
     return {
       success: true,
-      hedgeNeed: hedgeNeed,
-      fillPrice: fillPx,
-      fillSize: fillSz,
-      fillValue: fillSz * fillPx,
-      response: result.response
+      hedgeNeed,
+      fillPrice: outcome.fillPrice,
+      fillSize: outcome.fillSize,
+      fillValue: outcome.fillSize * outcome.fillPrice,
+      result
     };
-
   } catch (error) {
     if (verbose) {
-      console.error(`[Hedge]   ❌ Error: ${error.message}`);
+      console.error(`[Hedge]   Error: ${error.message}`);
     }
     return {
       success: false,
       error: error.message,
-      hedgeNeed: hedgeNeed
+      hedgeNeed
     };
   }
+}
+
+async function closeFallbackExposure(hyperliquid, hedgeNeed, config, options = {}) {
+  const { verbose = false } = options;
+
+  if (!hedgeNeed.fallbackCloseSymbol || !hedgeNeed.fallbackCloseSize || !hedgeNeed.fallbackCloseSide) {
+    return {
+      success: false,
+      error: 'No fallback close order is defined for this hedge need',
+      hedgeNeed
+    };
+  }
+
+  const isSpot = isSpotMarket(hedgeNeed.fallbackCloseMarket);
+  const minFillRatio = getMinFillRatio(config);
+  const assetId = await hyperliquid.getAssetId(hedgeNeed.fallbackCloseSymbol, isSpot);
+  const assetInfo = hyperliquid.getAssetInfo(hedgeNeed.fallbackCloseSymbol, assetId);
+  const sizeRounded = parseFloat(hyperliquid.roundSize(hedgeNeed.fallbackCloseSize, assetInfo.szDecimals, 'down'));
+
+  const result = await hyperliquid.createMarketOrder(
+    hedgeNeed.fallbackCloseSymbol,
+    hedgeNeed.fallbackCloseSide,
+    sizeRounded,
+    {
+      isSpot,
+      reduceOnly: isSpot ? false : hedgeNeed.fallbackCloseReduceOnly !== false,
+      slippage: config.trading?.maxSlippagePercent || 5.0,
+      overrideMidPrice: hedgeNeed.currentPrice,
+      sizeRoundingMode: 'down'
+    }
+  );
+
+  const outcome = assertCompleteFill(result, sizeRounded, {
+    minFillRatio,
+    fallbackPrice: hedgeNeed.currentPrice,
+    context: {
+      hedgeType: hedgeNeed.type,
+      symbol: hedgeNeed.fallbackCloseSymbol,
+      isSpot,
+      fallbackClose: true
+    }
+  });
+
+  if (verbose) {
+    console.log(`[Hedge]   Closed ${hedgeNeed.fallbackCloseSymbol}: ${outcome.fillSize} @ ${outcome.fillPrice.toFixed(2)}`);
+  }
+
+  return {
+    success: true,
+    hedgeNeed,
+    fillSize: outcome.fillSize,
+    fillPrice: outcome.fillPrice,
+    result
+  };
 }
 
 /**
@@ -246,6 +379,7 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
     minValueUSD = 1,
     fallbackToClose = true,
     managedSpotSymbols = null,
+    managedPerpSymbols = null,
     maxHedgeMismatchPercent = 30
   } = options;
 
@@ -259,6 +393,7 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
     minValueUSD,
     verbose: false,
     managedSpotSymbols,
+    managedPerpSymbols,
     maxHedgeMismatchPercent
   });
 
@@ -306,52 +441,19 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
       }
 
       try {
-        const closeSymbol = hedgeNeed.type === 'SPOT_NEEDS_PERP_SHORT' ? hedgeNeed.spotSymbol : hedgeNeed.perpSymbol;
-        const closeIsSpot = hedgeNeed.type === 'SPOT_NEEDS_PERP_SHORT';
-        const closeSize = hedgeNeed.type === 'SPOT_NEEDS_PERP_SHORT' ? hedgeNeed.spotSize : hedgeNeed.perpSize;
-        const closeSide = hedgeNeed.type === 'SPOT_NEEDS_PERP_SHORT' ? 'sell' : (hedgeNeed.perpSide === 'LONG' ? 'sell' : 'buy');
-
-        // Get asset info
-        const assetId = await hyperliquid.getAssetId(closeSymbol, closeIsSpot);
-        const assetInfo = hyperliquid.getAssetInfo(closeSymbol, assetId);
-        const sizeRounded = parseFloat(hyperliquid.roundSize(closeSize, assetInfo.szDecimals));
-
-        const closeResult = await hyperliquid.createMarketOrder(closeSymbol, closeSide, sizeRounded, {
-          isSpot: closeIsSpot,
-          reduceOnly: closeIsSpot ? false : true,
-          slippage: config.trading?.maxSlippagePercent || 5.0,
-          overrideMidPrice: hedgeNeed.currentPrice
+        const closeResult = await closeFallbackExposure(hyperliquid, hedgeNeed, config, { verbose });
+        results.closed.push({
+          hedgeNeed,
+          hedgeResult,
+          closeResult
         });
-
-        const filled = closeResult.response?.data?.statuses?.[0]?.filled;
-
-        if (filled) {
-          if (verbose) {
-            console.log(`[Hedge]   ✅ Closed ${closeSymbol} instead`);
-          }
-          results.closed.push({
-            hedgeNeed: hedgeNeed,
-            hedgeResult: hedgeResult,
-            closeResult: closeResult
-          });
-        } else {
-          if (verbose) {
-            const error = closeResult.response?.data?.statuses?.[0]?.error;
-            console.log(`[Hedge]   ❌ Failed to close: ${error || 'Unknown'}`);
-          }
-          results.failed.push({
-            hedgeNeed: hedgeNeed,
-            hedgeResult: hedgeResult,
-            closeError: closeResult.response?.data?.statuses?.[0]?.error
-          });
-        }
       } catch (error) {
         if (verbose) {
-          console.error(`[Hedge]   ❌ Error closing: ${error.message}`);
+          console.error(`[Hedge]   Error closing: ${error.message}`);
         }
         results.failed.push({
-          hedgeNeed: hedgeNeed,
-          hedgeResult: hedgeResult,
+          hedgeNeed,
+          hedgeResult,
           closeError: error.message
         });
       }
@@ -383,9 +485,29 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
     console.log();
   }
 
+  const postAnalysis = await analyzeHedgeNeeds(hyperliquid, {
+    minValueUSD,
+    verbose: false,
+    managedSpotSymbols,
+    managedPerpSymbols,
+    maxHedgeMismatchPercent
+  });
+
+  if (postAnalysis.needsHedging) {
+    results.failed.push({
+      hedgeNeed: null,
+      error: `Residual managed exposure remains after hedge attempts (${postAnalysis.hedgeNeeds.length} need(s))`,
+      postAnalysis
+    });
+    if (verbose) {
+      console.error(`[Hedge] Residual managed exposure remains after hedge attempts: ${postAnalysis.hedgeNeeds.length} need(s)`);
+    }
+  }
+
   return {
-    success: results.failed.length === 0,
+    success: results.failed.length === 0 && !postAnalysis.needsHedging,
     totalProcessed: analysis.hedgeNeeds.length,
+    postAnalysis,
     ...results
   };
 }
@@ -422,8 +544,18 @@ export function formatHedgeReport(analysis) {
     for (const need of analysis.hedgeNeeds) {
       lines.push(`📍 ${need.perpSymbol || need.spotSymbol}:`);
       lines.push(`   Type: ${need.type}`);
-      lines.push(`   Current: ${need.spotSize !== undefined ? `SPOT ${need.spotSize.toFixed(6)}` : `PERP ${need.perpSide.toUpperCase()} ${need.perpSize.toFixed(6)}`}`);
-      lines.push(`   Action Needed: ${need.action} ${(need.perpSizeNeeded || need.spotSizeNeeded).toFixed(6)} ${need.market}`);
+      if (need.spotSize !== undefined || need.perpSize !== undefined) {
+        const currentParts = [
+          need.perpSize !== undefined ? `PERP ${need.perpSide || ''} ${need.perpSize.toFixed(6)}` : null,
+          need.spotSize !== undefined ? `SPOT ${need.spotSize.toFixed(6)}` : null
+        ].filter(Boolean);
+        lines.push(`   Current: ${currentParts.join(' + ')}`);
+      }
+      if (need.targetSymbol) {
+        lines.push(`   Action Needed: ${need.targetSide.toUpperCase()} ${need.targetSize.toFixed(6)} ${need.targetMarket}`);
+      } else if (need.fallbackCloseSymbol) {
+        lines.push(`   Action Needed: CLOSE ${need.fallbackCloseSize.toFixed(6)} ${need.fallbackCloseMarket}`);
+      }
       lines.push(`   Value: $${need.valueUSD.toFixed(2)}`);
       lines.push(`   Reason: ${need.reason}`);
       lines.push('');

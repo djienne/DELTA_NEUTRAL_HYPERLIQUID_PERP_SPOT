@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { closeDeltaNeutralPosition, openDeltaNeutralPosition } from '../../utils/trade.js';
+import { getOrderFees } from '../../utils/order-fill.js';
 
 const baseOpportunity = {
   symbol: 'BTC',
@@ -33,6 +34,26 @@ const baseConfig = {
   }
 };
 
+test('order fee accounting reads only known fill fee fields', () => {
+  const result = {
+    response: {
+      data: {
+        statuses: [{
+          filled: {
+            totalSz: '1',
+            avgPx: '100',
+            fee: '0.12',
+            nested: { fee: '99' }
+          }
+        }]
+      }
+    },
+    someOtherFee: 42
+  };
+
+  assert.equal(getOrderFees(result), 0.12);
+});
+
 function filled(totalSz = '1', avgPx = '100') {
   return {
     response: {
@@ -55,6 +76,52 @@ function failed(error = 'boom') {
 
 function makeHyperliquid(handler, options = {}) {
   const calls = [];
+  const chain = {
+    perpPositions: [...(options.perpPositions || [])],
+    spotBalances: [...(options.spotBalances || [])]
+  };
+
+  function filledSize(result) {
+    const size = parseFloat(result?.response?.data?.statuses?.[0]?.filled?.totalSz || '0');
+    return Number.isFinite(size) ? size : 0;
+  }
+
+  function applyFill({ symbol, side, options: orderOptions }, result) {
+    const size = filledSize(result);
+    if (size <= 0) {
+      return;
+    }
+
+    if (orderOptions.isSpot) {
+      let balance = chain.spotBalances.find(b => b.coin === symbol);
+      const current = balance ? parseFloat(balance.total || '0') : 0;
+      const next = side === 'buy' ? current + size : Math.max(0, current - size);
+      if (next > 0) {
+        if (!balance) {
+          balance = { coin: symbol, total: '0', hold: '0' };
+          chain.spotBalances.push(balance);
+        }
+        balance.total = String(next);
+      } else {
+        chain.spotBalances = chain.spotBalances.filter(b => b.coin !== symbol);
+      }
+      return;
+    }
+
+    let position = chain.perpPositions.find(p => p.position.coin === symbol);
+    const current = position ? parseFloat(position.position.szi || '0') : 0;
+    const delta = side === 'buy' ? size : -size;
+    const next = current + delta;
+    if (Math.abs(next) > 1e-12) {
+      if (!position) {
+        position = { position: { coin: symbol, szi: '0', entryPx: '100', positionValue: '100' } };
+        chain.perpPositions.push(position);
+      }
+      position.position.szi = String(next);
+    } else {
+      chain.perpPositions = chain.perpPositions.filter(p => p.position.coin !== symbol);
+    }
+  }
 
   return {
     wallet: '0x0000000000000000000000000000000000000001',
@@ -84,10 +151,10 @@ function makeHyperliquid(handler, options = {}) {
     },
     async infoRequest(payload) {
       if (payload.type === 'clearinghouseState') {
-        return { assetPositions: options.perpPositions || [] };
+        return { assetPositions: chain.perpPositions };
       }
       if (payload.type === 'spotClearinghouseState') {
-        return { balances: options.spotBalances || [] };
+        return { balances: chain.spotBalances };
       }
       return {};
     },
@@ -99,7 +166,9 @@ function makeHyperliquid(handler, options = {}) {
     },
     async createMarketOrder(symbol, side, size, options) {
       calls.push({ symbol, side, size, options });
-      return handler({ symbol, side, size, options, index: calls.length - 1 });
+      const result = await handler({ symbol, side, size, options, index: calls.length - 1 });
+      applyFill({ symbol, side, size, options }, result);
+      return result;
     }
   };
 }
@@ -170,7 +239,7 @@ test('imbalanced partial fills are closed with actual filled sizes', async () =>
 
   await assert.rejects(
     () => openDeltaNeutralPosition(hyperliquid, baseOpportunity, baseBalances, baseConfig),
-    /Partial open fills were imbalanced/
+    /SPOT order failed or under-filled/
   );
 
   const cleanupSpot = hyperliquid.calls.find(call => call.symbol === 'UBTC' && call.side === 'sell');
@@ -179,6 +248,31 @@ test('imbalanced partial fills are closed with actual filled sizes', async () =>
   assert.equal(cleanupSpot.options.reduceOnly, false);
   assert.equal(cleanupPerp.size, 1);
   assert.equal(cleanupPerp.options.reduceOnly, true);
+
+  global.fetch = originalFetch;
+});
+
+test('equal partial open fills below threshold are closed instead of accepted', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, json: async () => ({ status: 'ok' }) });
+
+  const hyperliquid = makeHyperliquid(({ symbol, side, index }) => {
+    if (index === 0 && symbol === 'BTC' && side === 'sell') return filled('0.5');
+    if (index === 1 && symbol === 'UBTC' && side === 'buy') return filled('0.5');
+    if (symbol === 'UBTC' && side === 'sell') return filled('0.5');
+    if (symbol === 'BTC' && side === 'buy') return filled('0.5');
+    throw new Error(`Unexpected order ${symbol} ${side}`);
+  });
+
+  await assert.rejects(
+    () => openDeltaNeutralPosition(hyperliquid, baseOpportunity, baseBalances, baseConfig),
+    /minimum fill ratio/
+  );
+
+  const cleanupSpot = hyperliquid.calls.find(call => call.symbol === 'UBTC' && call.side === 'sell');
+  const cleanupPerp = hyperliquid.calls.find(call => call.symbol === 'BTC' && call.side === 'buy');
+  assert.equal(cleanupSpot.size, 0.5);
+  assert.equal(cleanupPerp.size, 0.5);
 
   global.fetch = originalFetch;
 });
@@ -193,7 +287,7 @@ test('rejected PERP open request reconciles and closes filled SPOT leg', async (
 
   await assert.rejects(
     () => openDeltaNeutralPosition(hyperliquid, baseOpportunity, baseBalances, baseConfig),
-    /PERP order failed: network down/
+    /PERP order failed or under-filled: network down/
   );
 
   const cleanup = hyperliquid.calls.at(-1);
@@ -220,7 +314,7 @@ test('both rejected open requests use on-chain reconciliation for cleanup', asyn
 
   await assert.rejects(
     () => openDeltaNeutralPosition(hyperliquid, baseOpportunity, baseBalances, baseConfig),
-    /Both orders failed/
+    /minimum fill ratio/
   );
 
   assert.ok(hyperliquid.calls.some(call => call.symbol === 'UBTC' && call.side === 'sell' && call.size === 1));

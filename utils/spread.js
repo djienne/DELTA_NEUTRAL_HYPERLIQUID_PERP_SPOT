@@ -32,7 +32,7 @@ export async function fetchWithConcurrencyLimit(tasks, limit = 10, delayBetweenB
  * @returns {number} Spread percentage (e.g., 0.15 for 0.15%)
  */
 function calculateSpreadPercent(bid, ask) {
-  if (bid <= 0 || ask <= 0) return null;
+  if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) return null;
   const mid = (bid + ask) / 2;
   const spread = ((ask - bid) / mid) * 100;
   return spread;
@@ -72,6 +72,9 @@ async function getSingleSpread(hyperliquid, symbol, isSpot) {
 
     const bid = parseFloat(bids[0].px);
     const ask = parseFloat(asks[0].px);
+    if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
+      throw new Error('Invalid bid/ask price');
+    }
     const mid = (bid + ask) / 2;
     const spreadPercent = calculateSpreadPercent(bid, ask);
 

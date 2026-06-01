@@ -5,6 +5,7 @@ import {
   getMaxBidAskSpreadPercent,
   getMaxHedgeMismatchPercent,
   getMaxOpenHedgeMismatchPercent,
+  getManagedPerpSymbols,
   getMinFillRatio,
   getStartupCleanupMode
 } from '../../utils/risk.js';
@@ -39,6 +40,14 @@ test('managed spot symbols derive from configured pairs and current state', () =
   assert.deepEqual([...managed].sort(), ['PURR', 'UBTC', 'UETH']);
 });
 
+test('managed perp symbols derive from configured pairs and current state', () => {
+  const managed = getManagedPerpSymbols({
+    trading: { pairs: ['BTC', 'ETH'] }
+  }, { perpSymbol: 'PURR' });
+
+  assert.deepEqual([...managed].sort(), ['BTC', 'ETH', 'PURR']);
+});
+
 test('delta-neutral analysis separates true hedges from imbalanced matches', () => {
   const perpPositions = [
     { symbol: 'BTC', side: 'SHORT', size: 1, sizeRaw: -1 },
@@ -58,4 +67,6 @@ test('delta-neutral analysis separates true hedges from imbalanced matches', () 
   assert.equal(analysis.imbalancedPairs.length, 2);
   assert.deepEqual(analysis.imbalancedPairs.map(pair => pair.symbol).sort(), ['ETH', 'SOL']);
   assert.equal(analysis.hasDeltaNeutral, true);
+  assert.equal(analysis.imbalancedPairs.find(pair => pair.symbol === 'ETH').imbalanceType, 'DOUBLE_LONG');
+  assert.equal(analysis.imbalancedPairs.find(pair => pair.symbol === 'SOL').imbalanceType, 'EXCESS_PERP_SHORT');
 });

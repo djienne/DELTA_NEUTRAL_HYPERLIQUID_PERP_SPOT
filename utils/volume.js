@@ -228,16 +228,19 @@ export async function convertVolumesToUSDC(hyperliquid, volumeResults) {
   // Convert string prices to numbers
   const priceMap = {};
   for (const [symbol, priceStr] of Object.entries(allMids)) {
-    priceMap[symbol] = parseFloat(priceStr);
+    const price = parseFloat(priceStr);
+    if (Number.isFinite(price) && price > 0) {
+      priceMap[symbol] = price;
+    }
   }
 
   // Add USDC conversions to each result
   const enrichedResults = volumeResults.map(result => {
-    const perpVol = typeof result.perpVolume === 'number' ? result.perpVolume : 0;
-    const spotVol = typeof result.spotVolume === 'number' ? result.spotVolume : 0;
+    const perpVol = Number.isFinite(result.perpVolume) ? result.perpVolume : null;
+    const spotVol = Number.isFinite(result.spotVolume) ? result.spotVolume : null;
     const price = priceMap[result.perpSymbol] || null;
 
-    if (price === null) {
+    if (price === null || perpVol === null || spotVol === null) {
       return {
         ...result,
         price: null,

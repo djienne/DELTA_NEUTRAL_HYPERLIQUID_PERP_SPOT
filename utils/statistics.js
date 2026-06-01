@@ -56,10 +56,12 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
   lines.push('');
 
   // Account Summary
+  const perpBalancePct = totalBalance > 0 ? (perpBalance / totalBalance * 100) : 0;
+  const spotBalancePct = totalBalance > 0 ? (spotBalance / totalBalance * 100) : 0;
   lines.push('Account Summary:');
   lines.push(`   Wallet: ${wallet}`);
-  lines.push(`   PERP Balance: $${perpBalance.toFixed(2)} (${(perpBalance / totalBalance * 100).toFixed(1)}%)`);
-  lines.push(`   SPOT Balance: $${spotBalance.toFixed(2)} (${(spotBalance / totalBalance * 100).toFixed(1)}%)`);
+  lines.push(`   PERP Balance: $${perpBalance.toFixed(2)} (${perpBalancePct.toFixed(1)}%)`);
+  lines.push(`   SPOT Balance: $${spotBalance.toFixed(2)} (${spotBalancePct.toFixed(1)}%)`);
   lines.push(`   Total Balance: $${totalBalance.toFixed(2)}`);
   lines.push('');
 
