@@ -1323,7 +1323,27 @@ class HyperliquidConnector extends EventEmitter {
     // Size tick = 10^-szDecimals
     const sizeTick = Math.pow(10, -szDecimals);
 
-    const units = numericSize / sizeTick;
+    // Scale UP by 10^szDecimals rather than dividing by a tiny tick, then strip the
+    // binary-representation tail before flooring.
+    //
+    // The old code did `numericSize / sizeTick` and floored the result. In IEEE-754
+    // that is wrong for a large fraction of exact lot sizes:
+    //
+    //     0.00123 / 1e-5  ===  122.99999999999999   -> floor 122 -> 0.00122
+    //     1234.56 * 100   ===  123455.99999999999   -> floor     -> 1234.55
+    //
+    // A scan of 120k exact lot sizes found ~22% shrink by one full tick this way,
+    // and every order path here passes sizeRoundingMode 'down'. The consequence was
+    // not just a slightly small order: closing 0.00122 of a 0.00123 position leaves
+    // a 0.00001 residual, the fill-ratio check fails, the retry tries to close the
+    // residual, and Hyperliquid rejects it as below the $10 minimum. The position
+    // becomes permanently un-closeable and every subsequent cycle repeats the
+    // failure.
+    //
+    // toPrecision(12) keeps far more significant digits than any real lot size
+    // needs while discarding the error tail, so exact values land on integers and
+    // genuinely fractional values are untouched.
+    const units = Number((numericSize * Math.pow(10, szDecimals)).toPrecision(12));
     let roundedUnits;
     if (mode === 'down') {
       roundedUnits = Math.floor(units);

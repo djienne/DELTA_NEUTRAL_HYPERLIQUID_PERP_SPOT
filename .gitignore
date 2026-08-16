@@ -20,3 +20,7 @@ nul
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local debug dumps (source slices captured while tracing a bug)
+_*.txt
+*.bak

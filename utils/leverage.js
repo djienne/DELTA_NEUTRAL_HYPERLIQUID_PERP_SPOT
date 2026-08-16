@@ -82,6 +82,27 @@ export async function updateLeverage(hyperliquid, coin, leverage, isCross = fals
 
     const result = await response.json();
 
+    // Hyperliquid returns HTTP 200 with an error BODY. Checking `response.ok`
+    // alone is not enough -- and this was the only place in the codebase that
+    // relied on the HTTP status instead of the payload's own status field.
+    //
+    // The consequence was severe and silent: openDeltaNeutralPosition aborts only
+    // if setLeverage THROWS, so a rejected leverage update returned success:true
+    // and the bot opened at whatever leverage the asset already carried. At a
+    // previously-set 20x isolated, a $300 short posts $15 of margin and liquidates
+    // on roughly a 5% adverse move -- leaving the spot leg naked, from a position
+    // the operator believed was 1x and market-neutral.
+    if (result?.status && result.status !== 'ok') {
+      throw new Error(
+        `Leverage update rejected for ${coin}: ${JSON.stringify(result.response ?? result)}`
+      );
+    }
+    // The nested statuses array carries per-action errors even when status === 'ok'.
+    const innerError = result?.response?.data?.statuses?.find?.((s) => s && s.error);
+    if (innerError) {
+      throw new Error(`Leverage update rejected for ${coin}: ${innerError.error}`);
+    }
+
     if (verbose) {
       console.log('[Leverage] ✅ Leverage updated:', result);
     }
