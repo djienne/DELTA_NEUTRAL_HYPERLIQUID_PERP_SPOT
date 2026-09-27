@@ -1,30 +1,10 @@
 import HyperliquidConnector from '../hyperliquid.js';
+import { fetchWithConcurrencyLimit } from './spread.js';
 
 /**
  * PERP-SPOT arbitrage/spread utilities for Hyperliquid trading
  * Checks price differences between PERP and SPOT markets for the same asset
  */
-
-/**
- * Helper function to limit concurrent requests
- * @param {Array<Function>} tasks - Array of promise-returning functions
- * @param {number} limit - Maximum number of concurrent requests
- * @param {number} delayBetweenBatches - Delay in ms between batches
- * @returns {Promise<Array>} Results array
- */
-export async function fetchWithConcurrencyLimit(tasks, limit = 10, delayBetweenBatches = 200) {
-  const results = [];
-  for (let i = 0; i < tasks.length; i += limit) {
-    const batch = tasks.slice(i, i + limit);
-    const batchResults = await Promise.all(batch.map(task => task()));
-    results.push(...batchResults);
-    // Small delay between batches to respect rate limits
-    if (i + limit < tasks.length) {
-      await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
-    }
-  }
-  return results;
-}
 
 /**
  * Calculate spread percentage between perp and spot mid prices

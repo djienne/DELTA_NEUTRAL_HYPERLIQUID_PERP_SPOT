@@ -9,7 +9,7 @@ import {
   getOrderFees,
   normalizeOrderOutcome
 } from './order-fill.js';
-import { getMaxOpenHedgeMismatchPercent, getMinFillRatio, getTakerFeeRate } from './risk.js';
+import { getMaxOpenHedgeMismatchPercent, getMinFillRatio, getTakerFees } from './risk.js';
 import { getPerpPositions, getSpotBalances } from './positions.js';
 
 /**
@@ -19,8 +19,9 @@ import { getPerpPositions, getSpotBalances } from './positions.js';
  * Position sizing is based on minimum order size requirements (minOrderSizeUSD).
  */
 
-function estimateFees(notional, config) {
-  return notional * getTakerFeeRate(config);
+function estimateFees(perpNotional, spotNotional, config) {
+  const fees = getTakerFees(config);
+  return perpNotional * fees.perp + spotNotional * fees.spot;
 }
 
 async function cleanupFilledLeg(hyperliquid, symbol, side, size, options) {
@@ -308,7 +309,7 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
           spotFillSzActual = exposure.spot.size;
         }
       } catch (reconcileError) {
-        console.error('[Trade] âš ï¸  Could not reconcile rejected order on-chain:', reconcileError.message);
+        console.error('[Trade] ⚠️  Could not reconcile rejected order on-chain:', reconcileError.message);
       }
     }
 
@@ -386,7 +387,7 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
     const hedgeMismatchPct = getSizeMismatchPercent(perpFillSz, spotFillSz);
 
     if (hedgeMismatchPct > maxOpenHedgeMismatchPercent) {
-      console.error('[Trade] âŒ Partial fill imbalance detected, closing filled legs...');
+      console.error('[Trade] ❌ Partial fill imbalance detected, closing filled legs...');
       console.error(`[Trade]   PERP filled: ${perpFillSz}/${perpSizeRounded}, SPOT filled: ${spotFillSz}/${spotSizeRounded}, mismatch: ${hedgeMismatchPct.toFixed(2)}%`);
 
       const cleanupErrors = await cleanupOpenExposure(
@@ -414,20 +415,6 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
       console.log(`[Trade]   SPOT: ${spotFillSz} @ $${spotFillPx.toFixed(2)}`);
     }
 
-    // CRITICAL: Use PREDICTED funding rate (what will be paid NEXT), not historical
-    // Use predicted if available, otherwise fall back to current/historical
-    const predictedFundingRate = opportunity.predictedFunding?.predictedFundingRate;
-    const currentFundingRate = opportunity.funding.fundingRate;
-    const useFundingRate = Number.isFinite(predictedFundingRate)
-      ? predictedFundingRate
-      : currentFundingRate;
-
-    const predictedAnnualizedFunding = opportunity.predictedFundingRate;
-    const avgAnnualizedFunding = opportunity.avgFundingRate;
-    const useAnnualizedFunding = Number.isFinite(predictedAnnualizedFunding)
-      ? predictedAnnualizedFunding
-      : avgAnnualizedFunding;
-
     return {
       success: true,
       symbol: symbol,
@@ -438,10 +425,10 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
       perpEntryPrice: perpFillPx,
       spotEntryPrice: spotFillPx,
       positionValue: perpFillSz * perpFillPx,
-      fundingRate: useFundingRate,  // Use predicted rate (hourly)
-      annualizedFunding: useAnnualizedFunding,  // Use predicted annualized rate
+      fundingRate: opportunity.funding.fundingRate,  // current hourly rate at open
+      annualizedFunding: opportunity.avgFundingRate,  // 7d average APY (decision basis)
       openFeesActual: getOrderFees(perpResult, spotResult),
-      openFeesEstimated: estimateFees((perpFillSz * perpFillPx) + (spotFillSz * spotFillPx), config),
+      openFeesEstimated: estimateFees(perpFillSz * perpFillPx, spotFillSz * spotFillPx, config),
       perpResult: perpResult,
       spotResult: spotResult
     };
@@ -472,24 +459,20 @@ export async function closeDeltaNeutralPosition(hyperliquid, position, config, o
     console.log(`[Trade] Reason: ${reason}`);
   }
 
-  // Get current prices (fetch orderbooks for both)
-  await hyperliquid.subscribeOrderbook(perpSymbol);
-  const perpAssetId = await hyperliquid.getAssetId(spotSymbol, true);
-  const spotOrderbookCoin = hyperliquid.getCoinForOrderbook(spotSymbol, perpAssetId);
-  await hyperliquid.subscribeOrderbook(spotOrderbookCoin);
+  // Fresh REST mids (no WebSocket subscription to leak) and on-chain sizes (state sizes can differ,
+  // e.g. the spot buy fee is taken from the bought token).
+  const spotAssetId = await hyperliquid.getAssetId(spotSymbol, true);
+  const spotOrderbookCoin = hyperliquid.getCoinForOrderbook(spotSymbol, spotAssetId);
+  const [mids, exposure] = await Promise.all([
+    hyperliquid.getAllMids(),
+    getOpenExposure(hyperliquid, perpSymbol, spotSymbol)
+  ]);
+  const perpMid = parseFloat(mids[perpSymbol]);
+  const spotMid = parseFloat(mids[spotOrderbookCoin]);
 
-  // Wait briefly for orderbook data
-  await new Promise(resolve => setTimeout(resolve, 1000));
-
-  const perpBidAsk = hyperliquid.getBidAsk(perpSymbol);
-  const spotBidAsk = hyperliquid.getBidAsk(spotOrderbookCoin);
-
-  if (!perpBidAsk || !spotBidAsk) {
+  if (!(perpMid > 0) || !(spotMid > 0)) {
     throw new Error('Failed to get current prices for closing position');
   }
-
-  const perpMid = (perpBidAsk.bid + perpBidAsk.ask) / 2;
-  const spotMid = (spotBidAsk.bid + spotBidAsk.ask) / 2;
 
   if (verbose) {
     console.log(`[Trade] Current prices - PERP: $${perpMid.toFixed(2)}, SPOT: $${spotMid.toFixed(2)}`);
@@ -515,9 +498,10 @@ export async function closeDeltaNeutralPosition(hyperliquid, position, config, o
   const minFillRatio = getMinFillRatio(config);
 
   try {
+    // A leg with no on-chain exposure is already closed; skip its order.
     const [perpSettled, spotSettled] = await Promise.allSettled([
-      // Close SHORT PERP (buy back)
-      hyperliquid.createMarketOrder(perpSymbol, 'buy', position.perpSize, {
+      // Close PERP (buy back the short)
+      exposure.perp && hyperliquid.createMarketOrder(perpSymbol, closeSideForPerpPosition(exposure.perp), exposure.perp.size, {
         isSpot: false,
         reduceOnly: true,
         slippage: config.trading.maxSlippagePercent,
@@ -526,7 +510,7 @@ export async function closeDeltaNeutralPosition(hyperliquid, position, config, o
       }),
 
       // Sell SPOT
-      hyperliquid.createMarketOrder(spotSymbol, 'sell', position.spotSize, {
+      exposure.spot && hyperliquid.createMarketOrder(spotSymbol, 'sell', exposure.spot.size, {
         isSpot: true,
         slippage: config.trading.maxSlippagePercent,
         overrideMidPrice: spotMid,
@@ -536,19 +520,19 @@ export async function closeDeltaNeutralPosition(hyperliquid, position, config, o
 
     // Verify both orders filled
     let perpOutcome = normalizeOrderOutcome(perpSettled, {
-      requestedSize: position.perpSize,
+      requestedSize: exposure.perp?.size,
       minFillRatio,
       fallbackPrice: perpMid
     });
     let spotOutcome = normalizeOrderOutcome(spotSettled, {
-      requestedSize: position.spotSize,
+      requestedSize: exposure.spot?.size,
       minFillRatio,
       fallbackPrice: spotMid
     });
     let perpResult = perpOutcome.result;
     let spotResult = spotOutcome.result;
-    let perpFilled = perpOutcome.isCompleteFill;
-    let spotFilled = spotOutcome.isCompleteFill;
+    let perpFilled = !exposure.perp || perpOutcome.isCompleteFill;
+    let spotFilled = !exposure.spot || spotOutcome.isCompleteFill;
 
     if (!perpFilled) {
       const perpError = perpOutcome.error;
@@ -631,15 +615,9 @@ export async function closeDeltaNeutralPosition(hyperliquid, position, config, o
       throw new Error(`Close fill acknowledged but on-chain exposure remains: ${remainingSummary}. Manual intervention may be required.`);
     }
 
+    // On-chain flat (checked above) is the ground truth; these sizes only feed the fee estimate.
     const perpCloseSz = getFilledSize(perpResult) || position.perpSize;
     const spotCloseSz = getFilledSize(spotResult) || position.spotSize;
-
-    if (perpCloseSz < position.perpSize * minFillRatio || spotCloseSz < position.spotSize * minFillRatio) {
-      throw new Error(
-        `Close orders partially filled. Manual intervention may be required. ` +
-        `PERP ${perpCloseSz}/${position.perpSize}, SPOT ${spotCloseSz}/${position.spotSize}`
-      );
-    }
 
     // Both closed successfully!
     const perpClosePx = getFilledPrice(perpResult, perpMid);
@@ -664,7 +642,7 @@ export async function closeDeltaNeutralPosition(hyperliquid, position, config, o
     }
 
     const closeFeesActual = getOrderFees(perpResult, spotResult);
-    const closeFeesEstimated = estimateFees((perpCloseSz * perpClosePx) + (spotCloseSz * spotClosePx), config);
+    const closeFeesEstimated = estimateFees(perpCloseSz * perpClosePx, spotCloseSz * spotClosePx, config);
     const feesActual = (position.openFeesActual || 0) + closeFeesActual;
     const feesEstimated = feesActual > 0 ? 0 : (position.openFeesEstimated || 0) + closeFeesEstimated;
     const totalFees = feesActual || feesEstimated;

@@ -4,7 +4,7 @@ services:
     container_name: hyperliquid-bot
     restart: unless-stopped
 
-    # Environment variables from .env file
+    # Optional runtime overrides (e.g. MIN_HOLD_TIME_MS); credentials live in hyperliquid.env
     env_file:
       - path: .env
         required: false
@@ -15,6 +15,8 @@ services:
     volumes:
       # Persist bot state across container restarts
       - ./data:/app/data
+      # Credentials (never baked into the image: *.env is dockerignored)
+      - ./hyperliquid.env:/app/hyperliquid.env:ro
       # Optional: Mount config if you want to modify without rebuilding
       - ./config.json:/app/config.json:ro
 

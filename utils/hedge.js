@@ -1,5 +1,5 @@
 import HyperliquidConnector from '../hyperliquid.js';
-import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral } from './positions.js';
+import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral, MIN_NOTIONAL_USD } from './positions.js';
 import { assertCompleteFill } from './order-fill.js';
 import { getMinFillRatio } from './risk.js';
 
@@ -36,7 +36,7 @@ function isSpotMarket(market) {
  */
 export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
   const {
-    minValueUSD = 1,
+    minValueUSD = MIN_NOTIONAL_USD,
     verbose = false,
     managedSpotSymbols = null,
     managedPerpSymbols = null,
@@ -376,7 +376,7 @@ async function closeFallbackExposure(hyperliquid, hedgeNeed, config, options = {
 export async function autoHedgeAll(hyperliquid, config, options = {}) {
   const {
     verbose = false,
-    minValueUSD = 1,
+    minValueUSD = MIN_NOTIONAL_USD,
     fallbackToClose = true,
     managedSpotSymbols = null,
     managedPerpSymbols = null,

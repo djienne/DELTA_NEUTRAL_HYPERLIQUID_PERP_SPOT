@@ -18,8 +18,12 @@ export function getMaxOpenHedgeMismatchPercent(config = {}) {
   return config.risk?.maxOpenHedgeMismatchPercent ?? 2;
 }
 
-export function getTakerFeeRate(config = {}) {
-  return config.trading?.takerFeeRate ?? config.fees?.takerFeeRate ?? 0;
+// Taker fee per leg (fraction of notional). Defaults are Hyperliquid base tier: perp 0.045%, spot 0.07%.
+export function getTakerFees(config = {}) {
+  return {
+    perp: config.trading?.takerFeeRate ?? 0.00045,
+    spot: config.trading?.spotTakerFeeRate ?? 0.0007
+  };
 }
 
 export function getStartupCleanupMode(config = {}) {
@@ -55,12 +59,4 @@ export function getManagedPerpSymbols(config = {}, currentPosition = null) {
   }
 
   return managed;
-}
-
-export function filterManagedSpotBalances(spotBalances, managedSpotSymbols) {
-  if (!managedSpotSymbols || managedSpotSymbols.size === 0) {
-    return spotBalances;
-  }
-
-  return spotBalances.filter(balance => managedSpotSymbols.has(balance.symbol));
 }

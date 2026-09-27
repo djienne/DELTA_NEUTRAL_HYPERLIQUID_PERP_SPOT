@@ -1,6 +1,4 @@
 import HyperliquidConnector from '../hyperliquid.js';
-import dotenv from 'dotenv';
-dotenv.config();
 
 async function checkBalances() {
   const hyperliquid = new HyperliquidConnector({ testnet: false });

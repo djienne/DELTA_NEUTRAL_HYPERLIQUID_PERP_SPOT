@@ -1,7 +1,7 @@
 import HyperliquidConnector from '../hyperliquid.js';
 import { getPerpPositions, getSpotBalances } from './positions.js';
-import { getFundingRatesWithHistory, getPredictedFundingRates } from './funding.js';
-import { get24HourVolumes, convertVolumesToUSDC } from './volume.js';
+import { getFundingRatesWithHistory } from './funding.js';
+import { get24HourVolumes } from './volume.js';
 import { getBidAskSpreads } from './spread.js';
 import { getPerpSpotSpreads } from './arbitrage.js';
 import { getBalances } from './balance.js';
@@ -33,16 +33,14 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
     getSpotBalances(hyperliquid, wallet, { verbose: false })
   ]);
 
-  // Market data - CRITICAL: Fetch PREDICTED funding rates
-  const [fundingRates, predictedFundingRates, volumes, bidAskSpreads, perpSpotSpreads] = await Promise.all([
+  // Market data
+  const [fundingRates, volumes, bidAskSpreads, perpSpotSpreads] = await Promise.all([
     getFundingRatesWithHistory(hyperliquid, symbols, { days: 7, verbose: false }),
-    getPredictedFundingRates(hyperliquid, { verbose: false }),
-    get24HourVolumes(hyperliquid, symbols, { verbose: false }),
+    get24HourVolumes(hyperliquid, symbols),
     getBidAskSpreads(hyperliquid, symbols, { config, verbose: false }),
     getPerpSpotSpreads(hyperliquid, symbols, { config, verbose: false })
   ]);
 
-  const volumesUSDC = await convertVolumesToUSDC(hyperliquid, volumes);
 
   // Helpers
   const fmtSigned = (n, digits = 1) => (n >= 0 ? ` ${n.toFixed(digits)}` : n.toFixed(digits)); // width ~5
@@ -79,7 +77,7 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
     if (spotBalances.length > 0) {
       lines.push(`   SPOT Balances (${spotBalances.length}, excluding USDC):`);
       for (const bal of spotBalances.slice(0, 5)) {
-        const value = bal.total * (bal.price || 0);
+        const value = bal.valueUSD ?? 0;
         lines.push(`     ${bal.symbol}: ${bal.total.toFixed(6)} ($${value.toFixed(2)})`);
       }
       if (spotBalances.length > 5) {
@@ -116,7 +114,7 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
   );
   lines.push(
     cell('', COLS.symbol) +
-    cell('Avg  | Pred', COLS.funding) +  // CRITICAL: Changed from Curr to Pred
+    cell('Avg  | Now', COLS.funding) +
     cell('(USDC)', COLS.vol) +
     cell('Perp  | Spot', COLS.bidask) +
     cell('', COLS.psspr) +
@@ -126,26 +124,25 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
 
   for (const symbol of symbols) {
     const funding = fundingRates.find(f => f.symbol === symbol);
-    const predicted = predictedFundingRates.get(symbol);  // CRITICAL: Get predicted funding
-    const volume = volumesUSDC.find(v => v.perpSymbol === symbol);
+    const volume = volumes.find(v => v.perpSymbol === symbol);
     const bidAskPerp = bidAskSpreads.find(s => s.symbol === symbol && !s.isSpot);
     const spotSymbol = HyperliquidConnector.perpToSpot(symbol);
     const bidAskSpot = bidAskSpreads.find(s => s.symbol === spotSymbol && s.isSpot);
     const perpSpot = perpSpotSpreads.find(s => s.perpSymbol === symbol);
 
     const avgFundingNum = funding?.history?.avg?.annualized ? (funding.history.avg.annualized * 100) : null;
-    const predFundingNum = predicted?.predictedAnnualizedRate ? (predicted.predictedAnnualizedRate * 100) : null;  // CRITICAL: Use predicted instead of current
+    const nowFundingNum = Number.isFinite(funding?.annualizedRate) ? funding.annualizedRate * 100 : null;
 
     const avgFunding = avgFundingNum !== null ? fmtSigned(avgFundingNum) : 'N/A';
-    const predFunding = predFundingNum !== null ? fmtSigned(predFundingNum) : 'N/A';  // CRITICAL: Show predicted
+    const nowFunding = nowFundingNum !== null ? fmtSigned(nowFundingNum) : 'N/A';
     const volStr = volume?.totalVolUSDC ? `$${(volume.totalVolUSDC / 1e6).toFixed(0)}M` : 'N/A';
     const perpSpread = bidAskPerp?.spreadPercent !== undefined ? bidAskPerp.spreadPercent.toFixed(3) : 'N/A';
     const spotSpread = bidAskSpot?.spreadPercent !== undefined ? bidAskSpot.spreadPercent.toFixed(3) : 'N/A';
     const psSpr = perpSpot?.spreadPercent !== undefined ? Math.abs(perpSpot.spreadPercent).toFixed(3) : 'N/A';
 
     let quality = '';
-    // Use predicted for quality assessment if available, otherwise fall back to average
-    const qualityBasis = (predFundingNum !== null ? predFundingNum : (avgFundingNum !== null ? avgFundingNum : null));
+    // Quality follows the decision basis: the 7-day average
+    const qualityBasis = avgFundingNum;
     if (qualityBasis !== null) {
       if (qualityBasis >= 10) quality = 'GOOD';
       else if (qualityBasis >= 5) quality = 'MOD';
@@ -154,7 +151,7 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
     }
 
     // Keep inner content within column width (no extra spaces around '|')
-    const fundingCell = `${avgFunding.padStart(5)}|${predFunding.padStart(5)}`;  // CRITICAL: Show predicted instead of current
+    const fundingCell = `${avgFunding.padStart(5)}|${nowFunding.padStart(5)}`;
     const bidAskCell = `${String(perpSpread).padStart(5)}|${String(spotSpread).padStart(5)}`;
 
     lines.push(
@@ -169,7 +166,7 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
 
   lines.push(bot);
   lines.push('');
-  lines.push('Legend: GOOD (≥10% APY) | MOD (5–10% APY) | NEG (<0% APY) | Avg = 7-day avg');
+  lines.push('Legend: GOOD (≥10% APY) | MOD (5–10% APY) | NEG (<0% APY) | Avg = 7-day avg | Now = current hour');
   lines.push('');
   lines.push('='.repeat(80));
   lines.push('');

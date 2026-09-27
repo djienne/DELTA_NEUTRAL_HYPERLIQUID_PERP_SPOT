@@ -1,16 +1,16 @@
 import HyperliquidConnector from './hyperliquid.js';
 import { loadState, saveState, hasPosition, getCurrentPosition, recordPosition, closePosition as closePositionState, updateCheckTime, canClosePosition, getPositionAge, formatPosition, getHistoryStats, setPendingIntent, clearPendingIntent } from './utils/state.js';
 import { checkAndReportBalances } from './utils/balance.js';
-import { findBestOpportunities, isSignificantlyBetter } from './utils/opportunity.js';
+import { findBestOpportunities } from './utils/opportunity.js';
 import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral } from './utils/positions.js';
 import { openDeltaNeutralPosition, closeDeltaNeutralPosition } from './utils/trade.js';
 import { logStatistics } from './utils/statistics.js';
 import { autoHedgeAll, analyzeHedgeNeeds, formatHedgeReport } from './utils/hedge.js';
 import { getFundingRates } from './utils/funding.js';
-import { get24HourVolumes, convertVolumesToUSDC } from './utils/volume.js';
+import { get24HourVolumes } from './utils/volume.js';
 import { getPerpSpotSpreads } from './utils/arbitrage.js';
 import { getManagedPerpSymbols, getManagedSpotSymbols, getMaxHedgeMismatchPercent, getStartupCleanupMode } from './utils/risk.js';
-import { getCurrentPositionFundingSignal, getPositiveReopenOpportunity, isNegativeFundingSignal } from './utils/position-decision.js';
+import { getCurrentPositionFundingSignal, switchEdge } from './utils/position-decision.js';
 import fs from 'fs';
 import { pathToFileURL } from 'url';
 
@@ -21,9 +21,9 @@ import { pathToFileURL } from 'url';
  *
  * Strategy:
  * - SHORT PERP + LONG SPOT to earn positive funding
- * - Minimum hold time: 2 weeks
  * - Check cycle: Every 1 hour
- * - Switch positions if funding becomes negative or significantly better opportunity exists (2x+)
+ * - Decisions on 7-day average funding; switch only when the expected gain beats fees + spread
+ *   (utils/position-decision.js switchEdge), after a minimum hold unless funding is negative
  */
 
 /**
@@ -76,8 +76,7 @@ HyperliquidConnector.configureSymbolMapping(config.symbolMapping || {});
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;  // 1 hour
 const MIN_HOLD_TIME_MS = process.env.MIN_HOLD_TIME_MS
   ? parseInt(process.env.MIN_HOLD_TIME_MS)
-  : (config.bot?.minHoldTimeDays ? config.bot.minHoldTimeDays * 24 * 60 * 60 * 1000 : 14 * 24 * 60 * 60 * 1000);  // Default: 2 weeks
-const IMPROVEMENT_FACTOR = config.bot?.improvementFactor || 2;  // Require 2x better funding to switch
+  : (config.bot?.minHoldTimeDays ?? 7) * 24 * 60 * 60 * 1000;  // Default: 7 days (= 7d funding window)
 const STATS_LOG_INTERVAL = 6;  // Log statistics every N cycles (6 cycles = 6 hours)
 const STATUS_DISPLAY_INTERVAL_MS = 2 * 60 * 1000;  // 2 minutes
 
@@ -134,7 +133,7 @@ async function initialize() {
   // Log configuration
   console.log('[Bot] Configuration:');
   console.log(`[Bot]   Min Hold Time: ${MIN_HOLD_TIME_MS / (1000 * 60 * 60 * 24)} days`);
-  console.log(`[Bot]   Improvement Factor: ${IMPROVEMENT_FACTOR}x`);
+  console.log(`[Bot]   Switch Horizon: ${config.bot?.switchHorizonDays ?? 8} days`);
   console.log(`[Bot]   Check Interval: ${CHECK_INTERVAL_MS / (1000 * 60 * 60)} hour(s)`);
   console.log();
 
@@ -152,11 +151,11 @@ async function initialize() {
 
   if (!hyperliquid.wallet) {
     console.error('❌ Error: Wallet address not configured');
-    console.error('   Please set HL_WALLET in .env file');
+    console.error('   Please set wallet_address in hyperliquid.env');
     process.exit(1);
   }
 
-  console.log(`[Bot] Wallet: ${hyperliquid.wallet}`);
+  console.log(`[Bot] Wallet: ${hyperliquid.wallet}${hyperliquid.vaultAddress ? ' (sub-account/vault: orders signed with vaultAddress)' : ''}`);
   console.log();
 
   // Connect to WebSocket for orderbook streaming
@@ -171,13 +170,11 @@ async function initialize() {
  */
 async function verifyPositionOnChain() {
   console.log('[Bot] Verifying position on-chain...');
-  const currentPosition = hasPosition(state) ? getCurrentPosition(state) : null;
-  const managedSpotSymbols = getManagedSpotSymbols(config, currentPosition);
-  const managedPerpSymbols = getManagedPerpSymbols(config, currentPosition);
+  const scope = managedScope(hasPosition(state) ? getCurrentPosition(state) : null);
 
   const [perpPositions, spotBalances] = await Promise.all([
-    getPerpPositions(hyperliquid, null, { verbose: false, managedPerpSymbols }),
-    getSpotBalances(hyperliquid, null, { verbose: false, managedSpotSymbols })
+    getPerpPositions(hyperliquid, null, scope),
+    getSpotBalances(hyperliquid, null, scope)
   ]);
 
   if (perpPositions.length === 0 && spotBalances.length === 0) {
@@ -186,9 +183,7 @@ async function verifyPositionOnChain() {
   }
 
   // Analyze for delta-neutral
-  const analysis = analyzeDeltaNeutral(perpPositions, spotBalances, {
-    maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
-  });
+  const analysis = analyzeDeltaNeutral(perpPositions, spotBalances, scope);
 
   if (analysis.deltaNeutralPairs.length > 0) {
     const pair = analysis.deltaNeutralPairs[0];
@@ -270,6 +265,15 @@ async function adoptOnChainPair(pair, reason = 'adopted on-chain position') {
   console.log(`${timestamp()} [Bot] Adopted managed on-chain position into state (${reason})`);
 }
 
+// Symbols and hedge tolerance the bot treats as its own exposure (dedicated account assumed)
+function managedScope(position) {
+  return {
+    managedSpotSymbols: Array.from(getManagedSpotSymbols(config, position)),
+    managedPerpSymbols: Array.from(getManagedPerpSymbols(config, position)),
+    maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
+  };
+}
+
 async function reconcilePendingIntent() {
   if (!state?.pendingIntent) {
     return;
@@ -290,14 +294,7 @@ async function reconcilePendingIntent() {
     return;
   }
 
-  await autoHedgeAll(hyperliquid, config, {
-    verbose: true,
-    minValueUSD: 1,
-    fallbackToClose: false,
-    managedSpotSymbols: Array.from(getManagedSpotSymbols(config, getCurrentPosition(state))),
-    managedPerpSymbols: Array.from(getManagedPerpSymbols(config, getCurrentPosition(state))),
-    maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
-  });
+  await autoHedgeAll(hyperliquid, config, { verbose: true, fallbackToClose: false, ...managedScope(getCurrentPosition(state)) });
 }
 
 /**
@@ -310,19 +307,10 @@ async function cleanupImbalancedPositions() {
 
   try {
     const startupCleanupMode = getStartupCleanupMode(config);
-    const currentPosition = hasPosition(state) ? getCurrentPosition(state) : null;
-    const managedSpotSymbols = Array.from(getManagedSpotSymbols(config, currentPosition));
-    const managedPerpSymbols = Array.from(getManagedPerpSymbols(config, currentPosition));
-    const maxHedgeMismatchPercent = getMaxHedgeMismatchPercent(config);
+    const scope = managedScope(hasPosition(state) ? getCurrentPosition(state) : null);
 
     if (startupCleanupMode === 'report-only') {
-      const analysis = await analyzeHedgeNeeds(hyperliquid, {
-        verbose: false,
-        minValueUSD: 1,
-        managedSpotSymbols,
-        managedPerpSymbols,
-        maxHedgeMismatchPercent
-      });
+      const analysis = await analyzeHedgeNeeds(hyperliquid, { verbose: false, ...scope });
 
       console.log('[Bot] Startup cleanup mode: report-only');
       console.log(formatHedgeReport(analysis));
@@ -337,11 +325,8 @@ async function cleanupImbalancedPositions() {
 
     const results = await autoHedgeAll(hyperliquid, config, {
       verbose: true,
-      minValueUSD: 1,
       fallbackToClose: startupCleanupMode === 'hedge-or-close',
-      managedSpotSymbols,
-      managedPerpSymbols,
-      maxHedgeMismatchPercent
+      ...scope
     });
 
     if (results.totalProcessed === 0) {
@@ -426,14 +411,7 @@ async function runCycle() {
         saveState(state);
       } else if (onChainPosition.status === 'imbalanced') {
         console.log(`${timestamp()} [Bot] Managed on-chain exposure is imbalanced. Halting new decisions this cycle.`);
-        await autoHedgeAll(hyperliquid, config, {
-          verbose: true,
-          minValueUSD: 1,
-          fallbackToClose: false,
-          managedSpotSymbols: Array.from(getManagedSpotSymbols(config, position)),
-          managedPerpSymbols: Array.from(getManagedPerpSymbols(config, position)),
-          maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
-        });
+        await autoHedgeAll(hyperliquid, config, { verbose: true, fallbackToClose: false, ...managedScope(position) });
         return;
       } else {
         // Check if we should close position
@@ -444,146 +422,33 @@ async function runCycle() {
         console.log(`${timestamp()} [2/6] Can Close: ${canClose ? 'YES' : 'NO'} (min hold: ${MIN_HOLD_TIME_MS / (1000 * 60 * 60 * 24)} days)`);
         console.log();
 
-        // Always check current funding. Negative funding is an emergency exit and
-        // must not wait for the normal rebalancing hold window.
         console.log(`${timestamp()} [3/6] Checking current opportunities...`);
         const analysis = await findBestOpportunities(hyperliquid, config.trading.pairs, config, { verbose: true });
         console.log();
         console.log(analysis.report);
         console.log();
 
-        const fundingSignal = getCurrentPositionFundingSignal(position, analysis);
-        if (fundingSignal.available) {
-          console.log(`${timestamp()} [4/6] Current position ${position.symbol} funding: ${fundingSignal.fundingPercent.toFixed(2)}% APY (${fundingSignal.fundingType})`);
+        // Cost-aware decision on 7d-average funding (see switchEdge). Only a position with negative
+        // funding may be acted on inside the minimum hold.
+        const signal = getCurrentPositionFundingSignal(position, analysis);
+        if (!signal.available) {
+          console.log(`${timestamp()} [4/6] ${signal.reason}. Holding current position.`);
         } else {
-          console.log(`${timestamp()} [4/6] ${fundingSignal.reason}`);
-        }
-
-        if (isNegativeFundingSignal(fundingSignal)) {
-          console.log(`${timestamp()} [4/6] âŒ Funding turned negative! Closing position immediately...`);
-
-          const newOpportunity = getPositiveReopenOpportunity(analysis);
-
-          if (newOpportunity) {
-            console.log(`${timestamp()} [4/6] âœ… Found positive opportunity: ${newOpportunity.symbol} (${newOpportunity.primaryFundingPercent.toFixed(2)}% APY)`);
-          } else {
-            console.log(`${timestamp()} [4/6] âš ï¸  No positive funding opportunities available. Will close without reopening.`);
+          const best = analysis.best && analysis.best.symbol !== position.symbol ? analysis.best : null;
+          const switchGain = best ? switchEdge(signal.fundingRate, best, config) : -Infinity;
+          const closeGain = switchEdge(signal.fundingRate, null, config);
+          console.log(`${timestamp()} [4/6] ${position.symbol} 7d avg funding: ${signal.fundingPercent.toFixed(2)}% APY`);
+          if (best) {
+            console.log(`${timestamp()} [4/6] Best alternative ${best.symbol}: ${best.avgFundingPercent.toFixed(2)}% APY, expected switch gain ${(switchGain * 100).toFixed(3)}% of notional`);
           }
 
-          await closeAndReopen(position, 'Funding turned negative', newOpportunity);
-          return;
-        }
-
-        if (canClose) {
-          console.log(`${timestamp()} [3/6] Position can rebalance; evaluating non-emergency changes...`);
-
-          // Find current position's funding
-          const currentSymbolOpp = analysis.rankedOpportunities.find(o => o.symbol === position.symbol);
-
-          // If not in ranked opportunities, check raw market data (might be filtered out due to low/negative funding)
-          if (!currentSymbolOpp) {
-            console.log(`${timestamp()} [4/6] ⚠️  ${position.symbol} not in ranked opportunities (may be filtered out)`);
-
-            // Check raw funding data from marketData
-            const rawFundingData = analysis.marketData.fundingRates.find(f => f.symbol === position.symbol);
-            const rawPredictedData = analysis.marketData.predictedFundingRates?.get(position.symbol);
-
-            if (rawFundingData && !rawFundingData.error) {
-              // CRITICAL: Use PREDICTED funding rate (what will be paid NEXT), not historical
-              const predictedFunding = rawPredictedData?.predictedAnnualizedRate;
-              const avgFunding = rawFundingData.history?.avg?.annualized ?? rawFundingData.annualizedRate;
-              const useFunding = Number.isFinite(predictedFunding) ? predictedFunding : avgFunding;
-              if (!Number.isFinite(useFunding)) {
-                console.log(`${timestamp()} [4/6] Funding data for ${position.symbol} is not finite. Skipping close decision.`);
-                return;
-              }
-              const useFundingPercent = useFunding * 100;
-
-              console.log(`${timestamp()} [4/6] Funding data: ${useFundingPercent.toFixed(2)}% APY ${Number.isFinite(predictedFunding) ? '(predicted)' : '(avg)'}`);
-
-              // Check if funding is negative
-              if (useFundingPercent < 0) {
-                console.log(`${timestamp()} [4/6] ❌ Funding is negative! Closing position...`);
-
-                // Only reopen if there's a valid positive opportunity (check primaryFundingPercent)
-                const newOpportunity = (analysis.best && analysis.best.primaryFundingPercent > 0) ? analysis.best : null;
-
-                if (newOpportunity) {
-                  console.log(`${timestamp()} [4/6] ✅ Found positive opportunity: ${newOpportunity.symbol} (${newOpportunity.primaryFundingPercent.toFixed(2)}% APY)`);
-                } else {
-                  console.log(`${timestamp()} [4/6] ⚠️  No positive funding opportunities available. Will close without reopening.`);
-                }
-
-                await closeAndReopen(position, 'Funding turned negative', newOpportunity);
-                return;
-              } else if (useFundingPercent < config.thresholds.minFundingRatePercent) {
-                console.log(`${timestamp()} [4/6] ⚠️  Funding below minimum threshold (${useFundingPercent.toFixed(2)}% < ${config.thresholds.minFundingRatePercent}%)`);
-                console.log(`${timestamp()} [4/6] Checking for better opportunities...`);
-
-                // Close and switch to better opportunity if one exists
-                if (analysis.best && analysis.best.symbol !== position.symbol) {
-                  console.log(`${timestamp()} [4/6] ✅ Found better opportunity: ${analysis.best.symbol} (${analysis.best.primaryFundingPercent.toFixed(2)}% APY)`);
-                  await closeAndReopen(position, 'Funding below minimum threshold', analysis.best);
-                  return;
-                } else {
-                  console.log(`${timestamp()} [4/6] No better opportunities available. Holding current position.`);
-                }
-              }
-            } else {
-              console.log(`${timestamp()} [4/6] ❌ Cannot retrieve funding data for ${position.symbol}`);
-            }
-          } else {
-            // CRITICAL: Use primaryFundingPercent (predicted if available, else avg)
-            const currentFunding = currentSymbolOpp.primaryFundingPercent;
-            if (!Number.isFinite(currentFunding)) {
-              console.log(`${timestamp()} [4/6] Current funding for ${position.symbol} is not finite. Holding current position.`);
-              return;
-            }
-            const fundingType = Number.isFinite(currentSymbolOpp.predictedFundingPercent) ? '(predicted)' : '(avg)';
-            console.log(`${timestamp()} [4/6] Current position ${position.symbol} funding: ${currentFunding.toFixed(2)}% APY ${fundingType}`);
-
-            // Check if funding is negative
-            if (currentFunding < 0) {
-              console.log(`${timestamp()} [4/6] ❌ Funding turned negative! Closing position...`);
-
-              // Only reopen if there's a valid positive opportunity (check primaryFundingPercent)
-              const newOpportunity = (analysis.best && analysis.best.primaryFundingPercent > 0) ? analysis.best : null;
-
-              if (newOpportunity) {
-                console.log(`${timestamp()} [4/6] ✅ Found positive opportunity: ${newOpportunity.symbol} (${newOpportunity.primaryFundingPercent.toFixed(2)}% APY)`);
-              } else {
-                console.log(`${timestamp()} [4/6] ⚠️  No positive funding opportunities available. Will close without reopening.`);
-              }
-
-              await closeAndReopen(position, 'Funding turned negative', newOpportunity);
-              return;
-            }
-
-            // Check if significantly better opportunity exists
-            if (analysis.best && analysis.best.symbol !== position.symbol) {
-              const incumbentFundingRate = currentSymbolOpp.primaryFundingRate ?? position.annualizedFunding;
-              const isBetter = isSignificantlyBetter(
-                { avgFundingRate: incumbentFundingRate },
-                { avgFundingRate: analysis.best.primaryFundingRate },  // Use primaryFundingRate for comparison
-                IMPROVEMENT_FACTOR
-              );
-
-              if (isBetter) {
-                console.log(`${timestamp()} [4/6] ✅ Found significantly better opportunity: ${analysis.best.symbol}`);
-                console.log(`${timestamp()} [4/6]   Current: ${(incumbentFundingRate * 100).toFixed(2)}% APY`);
-                console.log(`${timestamp()} [4/6]   New: ${analysis.best.primaryFundingPercent.toFixed(2)}% APY`);
-                console.log(`${timestamp()} [4/6]   Improvement: ${(analysis.best.primaryFundingRate / incumbentFundingRate).toFixed(2)}x`);
-                await closeAndReopen(position, 'Switching to better opportunity', analysis.best);
-                return;
-              } else {
-                console.log(`${timestamp()} [4/6] Current position is still competitive`);
-              }
-            }
+          const action = switchGain > 0 ? 'switch' : closeGain > 0 ? 'close' : null;
+          if (action && (canClose || signal.fundingRate < 0)) {
+            const reason = signal.fundingRate < 0 ? 'Funding negative' : 'Better opportunity';
+            await closeAndReopen(position, reason, action === 'switch' ? best : null);
+            return;
           }
-
-          console.log(`${timestamp()} [5/6] Holding current position`);
-        } else {
-          console.log(`${timestamp()} [3/6] Position within minimum hold time, skipping non-emergency rebalancing`);
+          console.log(`${timestamp()} [5/6] Holding current position${action ? ' (within minimum hold)' : ''}`);
         }
 
         // Update check time
@@ -607,91 +472,28 @@ async function runCycle() {
           await adoptOnChainPair(onChainPosition.pair, 'existing managed exposure');
         } else {
           console.log(`${timestamp()} [Bot] Status: ${onChainPosition.status}. Attempting hedge-only startup reconciliation.`);
-          await autoHedgeAll(hyperliquid, config, {
-            verbose: true,
-            minValueUSD: 1,
-            fallbackToClose: false,
-            managedSpotSymbols: Array.from(getManagedSpotSymbols(config, null)),
-            managedPerpSymbols: Array.from(getManagedPerpSymbols(config, null)),
-            maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
-          });
+          await autoHedgeAll(hyperliquid, config, { verbose: true, fallbackToClose: false, ...managedScope(null) });
         }
         return;
       }
     }
 
-    // Step 2: Check balance distribution
-    console.log(`${timestamp()} [2/6] Checking Balance Distribution...`);
-    const balanceReport = await checkAndReportBalances(hyperliquid, 10);
-    console.log(balanceReport.report);
-    console.log();
-
-    // Step 3: Find best opportunity
+    // Find best opportunity
     console.log(`${timestamp()} [3/6] Finding Best Opportunities...`);
     const analysis = await findBestOpportunities(hyperliquid, config.trading.pairs, config, { verbose: true });
     console.log();
     console.log(analysis.report);
     console.log();
 
-    // No valid opportunities (includes case where all symbols have negative funding)
-    // Opportunities are filtered by minFundingRatePercent threshold (default 5% APY)
+    // No valid opportunities (e.g. all symbols below minFundingRatePercent on 7d average)
     if (!analysis.best) {
-      console.log(`${timestamp()} [4/6] ❌ No valid opportunities found. Waiting for next cycle...`);
-      console.log(`${timestamp()} [4/6]   (All symbols filtered out - may be negative funding, low volume, or high spreads)`);
-      console.log(`${timestamp()} [5/6] Skipped`);
+      console.log(`${timestamp()} [4/6] ❌ No valid opportunities found (funding, volume or spread filters). Waiting for next cycle...`);
       console.log(`${timestamp()} [6/6] Next check in 1 hour`);
       console.log();
       return;
     }
 
-    // Step 4: Open position
-    console.log(`${timestamp()} [4/6] Opening Delta-Neutral Position for ${analysis.best.symbol}...`);
-    console.log();
-
-    try {
-      state = setPendingIntent(state, {
-        type: 'opening',
-        symbol: analysis.best.symbol,
-        perpSymbol: analysis.best.symbol,
-        spotSymbol: HyperliquidConnector.perpToSpot(analysis.best.symbol)
-      });
-      saveState(state);
-
-      const positionResult = await openDeltaNeutralPosition(
-        hyperliquid,
-        analysis.best,
-        balanceReport.balances,
-        config,
-        { verbose: true }
-      );
-
-      if (positionResult.success) {
-        console.log();
-        console.log(`${timestamp()} [5/6] ✅ Position Opened Successfully!`);
-        console.log(`${timestamp()} [5/6]   Symbol: ${positionResult.symbol}`);
-        console.log(`${timestamp()} [5/6]   PERP: SHORT ${positionResult.perpSize} @ $${positionResult.perpEntryPrice.toFixed(2)}`);
-        console.log(`${timestamp()} [5/6]   SPOT: LONG ${positionResult.spotSize} @ $${positionResult.spotEntryPrice.toFixed(2)}`);
-        console.log(`${timestamp()} [5/6]   Position Value: $${positionResult.positionValue.toFixed(2)}`);
-        console.log(`${timestamp()} [5/6]   Funding: ${(positionResult.annualizedFunding * 100).toFixed(2)}% APY`);
-        console.log();
-
-        // Record position in state
-        state = recordPosition(state, positionResult);
-        saveState(state);
-        console.log(`${timestamp()} [5/6] Position recorded in state`);
-      } else {
-        console.log(`${timestamp()} [5/6] Failed to open position`);
-        state = clearPendingIntent(state);
-        saveState(state);
-      }
-    } catch (error) {
-      console.error(`${timestamp()} [5/6] Error opening position:`, error.message);
-      const onChainAfterError = await verifyPositionOnChain();
-      if (onChainAfterError.status === 'none') {
-        state = clearPendingIntent(state);
-        saveState(state);
-      }
-    }
+    await openPosition(analysis.best, 'best opportunity');
 
     console.log(`${timestamp()} [6/6] Next check in 1 hour`);
     console.log();
@@ -703,83 +505,64 @@ async function runCycle() {
 }
 
 /**
- * Close current position and open new one
+ * Open a delta-neutral position behind a crash-safe pending intent. The intent is cleared on failure
+ * unless exposure may exist on-chain, which the next start (reconcilePendingIntent) then resolves.
+ */
+async function openPosition(opportunity, reason) {
+  console.log(`${timestamp()} [4/6] Opening Delta-Neutral Position for ${opportunity.symbol} (${reason})...`);
+  state = setPendingIntent(state, {
+    type: 'opening',
+    symbol: opportunity.symbol,
+    perpSymbol: opportunity.symbol,
+    spotSymbol: HyperliquidConnector.perpToSpot(opportunity.symbol),
+    reason
+  });
+  saveState(state);
+
+  try {
+    const balanceReport = await checkAndReportBalances(hyperliquid, 10);
+    console.log(balanceReport.report);
+    const result = await openDeltaNeutralPosition(hyperliquid, opportunity, balanceReport.balances, config, { verbose: true });
+    if (result.success) {
+      console.log(`${timestamp()} [5/6] ✅ Opened ${result.symbol}: SHORT ${result.perpSize} PERP @ $${result.perpEntryPrice.toFixed(2)}, ` +
+        `LONG ${result.spotSize} SPOT @ $${result.spotEntryPrice.toFixed(2)}, value $${result.positionValue.toFixed(2)}, ` +
+        `7d funding ${(result.annualizedFunding * 100).toFixed(2)}% APY`);
+      state = recordPosition(state, result);
+      saveState(state);
+      return;
+    }
+    console.log(`${timestamp()} [5/6] Failed to open position: ${result.error}`);
+  } catch (error) {
+    console.error(`${timestamp()} [5/6] Error opening position:`, error.message);
+    if ((await verifyPositionOnChain()).status !== 'none') {
+      return;  // keep the intent: on-chain exposure must be reconciled
+    }
+  }
+  state = clearPendingIntent(state);
+  saveState(state);
+}
+
+/**
+ * Close the current position (throws on any failure) and optionally open a new one.
  */
 async function closeAndReopen(currentPosition, reason, newOpportunity) {
   console.log(`${timestamp()} [Bot] Closing position: ${reason}`);
-  console.log();
+  state = setPendingIntent(state, {
+    type: 'closing',
+    symbol: currentPosition.symbol,
+    perpSymbol: currentPosition.perpSymbol,
+    spotSymbol: currentPosition.spotSymbol,
+    reason
+  });
+  saveState(state);
 
-  try {
-    state = setPendingIntent(state, {
-      type: 'closing',
-      symbol: currentPosition.symbol,
-      perpSymbol: currentPosition.perpSymbol,
-      spotSymbol: currentPosition.spotSymbol,
-      reason
-    });
-    saveState(state);
+  const closeResult = await closeDeltaNeutralPosition(hyperliquid, currentPosition, config, { verbose: true, reason });
+  console.log(`${timestamp()} ✅ Position closed. PnL: $${closeResult.totalPnl.toFixed(2)}`);
+  state = closePositionState(state, closeResult);
+  saveState(state);
 
-    // Close current position
-    const closeResult = await closeDeltaNeutralPosition(
-      hyperliquid,
-      currentPosition,
-      config,
-      { verbose: true, reason }
-    );
-
-    if (closeResult.success) {
-      console.log();
-      console.log(`${timestamp()} ✅ Position Closed Successfully!`);
-      console.log(`${timestamp()}    PnL: $${closeResult.totalPnl.toFixed(2)}`);
-      console.log();
-
-      // Update state
-      state = closePositionState(state, closeResult);
-      saveState(state);
-
-      // Open new position if opportunity provided
-      if (newOpportunity) {
-        console.log(`Opening new position for ${newOpportunity.symbol}...`);
-        console.log();
-
-        // Get fresh balance data
-        const balanceReport = await checkAndReportBalances(hyperliquid, 10);
-
-        state = setPendingIntent(state, {
-          type: 'opening',
-          symbol: newOpportunity.symbol,
-          perpSymbol: newOpportunity.symbol,
-          spotSymbol: HyperliquidConnector.perpToSpot(newOpportunity.symbol),
-          reason: 'reopen after close'
-        });
-        saveState(state);
-
-        const positionResult = await openDeltaNeutralPosition(
-          hyperliquid,
-          newOpportunity,
-          balanceReport.balances,
-          config,
-          { verbose: true }
-        );
-
-        if (positionResult.success) {
-          console.log();
-          console.log('✅ New Position Opened Successfully!');
-          console.log(`   Symbol: ${positionResult.symbol}`);
-          console.log(`   Funding: ${(positionResult.annualizedFunding * 100).toFixed(2)}% APY`);
-          console.log();
-
-          state = recordPosition(state, positionResult);
-          saveState(state);
-        }
-      }
-    } else {
-      console.error('❌ Failed to close position');
-      throw new Error('Failed to close position');
-    }
-  } catch (error) {
-    console.error('❌ Error closing position:', error.message);
-    throw error;
+  if (newOpportunity) {
+    await openPosition(newOpportunity, `after close: ${reason}`);
   }
 }
 
@@ -869,9 +652,7 @@ async function displayStatus() {
 
     if (canClose) {
       console.log(`${colors.green}✅ Can Rebalance: YES${colors.reset} ${colors.dim}(held > ${minHoldDays} days)${colors.reset}`);
-      console.log(`   ${colors.dim}Will close if:${colors.reset}`);
-      console.log(`   • Funding turns negative, OR`);
-      console.log(`   • ${IMPROVEMENT_FACTOR}x better opportunity exists`);
+      console.log(`   ${colors.dim}Switches only if the expected funding gain beats fees + spread${colors.reset}`);
     } else {
       if (daysUntilCanClose >= 1) {
         console.log(`${colors.yellow}⏳ Can Rebalance: NO${colors.reset} ${colors.dim}(need ${daysUntilCanClose.toFixed(2)} more days)${colors.reset}`);
@@ -896,25 +677,15 @@ async function displayStatus() {
 
   // Fetch and display market summary
   try {
-    const colors = {
-      reset: '\x1b[0m',
-      bright: '\x1b[1m',
-      dim: '\x1b[2m',
-      cyan: '\x1b[36m',
-      green: '\x1b[32m',
-      yellow: '\x1b[33m',
-      red: '\x1b[31m'
-    };
-
     console.log(`${colors.bright}📈 Market Summary:${colors.reset}`);
     console.log();
 
     // Fetch current funding rates only (faster, no history to avoid rate limits)
     // Fetch market data (funding, volumes, perp-spot spreads) with exponential backoff for 429 errors
-    const [fundingData, rawVolumes, perpSpotSpreads] = await retryWithExponentialBackoff(
+    const [fundingData, volumes, perpSpotSpreads] = await retryWithExponentialBackoff(
       async () => Promise.all([
         getFundingRates(hyperliquid, config.trading.pairs, { verbose: false }),
-        get24HourVolumes(hyperliquid, config.trading.pairs, { verbose: false }),
+        get24HourVolumes(hyperliquid, config.trading.pairs),
         getPerpSpotSpreads(hyperliquid, config.trading.pairs, { verbose: false })
       ]),
       {
@@ -966,8 +737,6 @@ async function displayStatus() {
       console.error(colors.dim + `[Status] Could not fetch bid-ask spreads: ${error.message}` + colors.reset);
     }
 
-    // Convert volumes to USDC
-    const volumes = await convertVolumesToUSDC(hyperliquid, rawVolumes);
 
     // Check if we got valid data
     if (!fundingData || fundingData.length === 0) {

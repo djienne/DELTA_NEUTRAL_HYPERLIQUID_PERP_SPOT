@@ -47,15 +47,6 @@ export function getFilledPrice(result, fallbackPrice = 0) {
   return Number.isFinite(price) ? price : fallbackPrice;
 }
 
-export function isFillComplete(result, requestedSize, minFillRatio = 0.999) {
-  if (!getFilledStatus(result)) {
-    return false;
-  }
-
-  const filledSize = getFilledSize(result);
-  return filledSize >= requestedSize * minFillRatio;
-}
-
 export function normalizeOrderOutcome(input, options = {}) {
   const {
     requestedSize = null,

@@ -44,8 +44,9 @@ export async function updateLeverage(hyperliquid, coin, leverage, isCross = fals
 
   const nonce = typeof hyperliquid.nextNonce === 'function' ? hyperliquid.nextNonce() : Date.now();
 
-  // Sign action
-  const signature = await hyperliquid.signAction(action, nonce, options.vaultAddress, options.expiresAfter);
+  // Sign action (sub-account/vault: must name the account, or the master account's leverage changes)
+  const vaultAddress = options.vaultAddress ?? hyperliquid.vaultAddress;
+  const signature = await hyperliquid.signAction(action, nonce, vaultAddress, options.expiresAfter);
 
   // Create payload
   const payload = {
@@ -54,33 +55,23 @@ export async function updateLeverage(hyperliquid, coin, leverage, isCross = fals
     signature
   };
 
-  if (options.vaultAddress) {
-    payload.vaultAddress = typeof hyperliquid.normalizeVaultAddress === 'function'
-      ? hyperliquid.normalizeVaultAddress(options.vaultAddress)
-      : options.vaultAddress;
+  if (vaultAddress) {
+    payload.vaultAddress = hyperliquid.normalizeVaultAddress(vaultAddress);
   }
 
   if (options.expiresAfter !== null && options.expiresAfter !== undefined) {
     payload.expiresAfter = options.expiresAfter;
   }
 
-  // Send request
+  // Send request (with timeout: a stalled request here used to hang the whole trading cycle)
   try {
-    const requestFetch = hyperliquid.fetch || fetch;
-    const response = await requestFetch(hyperliquid.exchangeUrl, {
+    const result = await hyperliquid.fetchJsonWithTimeout(hyperliquid.exchangeUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`HTTP ${response.status}: ${errorText}`);
-    }
-
-    const result = await response.json();
+    }, { timeoutMs: hyperliquid.orderTimeoutMs });
 
     // Hyperliquid returns HTTP 200 with an error BODY. Checking `response.ok`
     // alone is not enough -- and this was the only place in the codebase that

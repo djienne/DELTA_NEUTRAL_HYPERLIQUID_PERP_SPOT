@@ -1,9 +1,6 @@
 import { requireLiveTradingTest } from '../utils/live-guard.js';
 requireLiveTradingTest('tests/test-spot-market-orders.js');
 import HyperliquidConnector from '../hyperliquid.js';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 /**
  * Test spot market orders on Hyperliquid
@@ -108,7 +105,7 @@ async function testSpotMarketOrders() {
         // Place buy order
         const result = await hyperliquid.createMarketOrder(symbol, 'buy', quantity, {
           isSpot: true,
-          slippage: 0.02 // 2% slippage
+          slippage: 2 // percent
         });
 
         console.log(`  Result: ${JSON.stringify(result)}`);
@@ -169,7 +166,7 @@ async function testSpotMarketOrders() {
         // Place sell order
         const result = await hyperliquid.createMarketOrder(symbol, 'sell', quantity, {
           isSpot: true,
-          slippage: 0.02 // 2% slippage
+          slippage: 2 // percent
         });
 
         console.log(`  Result: ${JSON.stringify(result)}`);

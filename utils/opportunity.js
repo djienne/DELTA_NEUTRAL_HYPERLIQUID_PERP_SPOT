@@ -1,8 +1,8 @@
 import HyperliquidConnector from '../hyperliquid.js';
 import { getBidAskSpreads } from './spread.js';
 import { getPerpSpotSpreads } from './arbitrage.js';
-import { get24HourVolumes, convertVolumesToUSDC } from './volume.js';
-import { getFundingRatesWithHistory, getPredictedFundingRates } from './funding.js';
+import { get24HourVolumes } from './volume.js';
+import { getFundingRatesWithHistory } from './funding.js';
 import { getMaxBidAskSpreadPercent } from './risk.js';
 
 function isFiniteNumber(value) {
@@ -16,8 +16,7 @@ function isFiniteNumber(value) {
  * - Bid-ask spreads
  * - PERP-SPOT spreads
  * - 24-hour volume
- * - PREDICTED funding rates (what will be paid NEXT)
- * - 7-day average funding rates (for context/stability assessment)
+ * - 7-day average funding rate (drives filtering and ranking)
  */
 
 /**
@@ -36,33 +35,22 @@ export async function getMarketData(hyperliquid, symbols, config, options = {}) 
   }
 
   // Fetch all data in parallel for speed
-  // CRITICAL: Now fetching PREDICTED funding rates for decision-making
-  const [bidAskSpreads, perpSpotSpreads, volumes, fundingRatesHistory, predictedFundingRates] = await Promise.all([
+  const [bidAskSpreads, perpSpotSpreads, volumes, fundingRatesHistory] = await Promise.all([
     getBidAskSpreads(hyperliquid, symbols, { config, verbose: false }),
     getPerpSpotSpreads(hyperliquid, symbols, { config, verbose: false }),
-    get24HourVolumes(hyperliquid, symbols, { config, verbose: false }),
-    getFundingRatesWithHistory(hyperliquid, symbols, { days: 7, verbose: false }),
-    getPredictedFundingRates(hyperliquid, { verbose: false })
+    get24HourVolumes(hyperliquid, symbols),
+    getFundingRatesWithHistory(hyperliquid, symbols, { days: 7, verbose: false })
   ]);
-
-  if (predictedFundingRates.size === 0) {
-    console.warn('[Market Data] Predicted funding returned no usable HlPerp rates; symbols will rely on finite historical fallback only.');
-  }
-
-  // Convert volumes to USDC
-  const volumesUSDC = await convertVolumesToUSDC(hyperliquid, volumes);
 
   if (verbose) {
     console.log(`[Market Data] ✅ Fetched data for ${symbols.length} symbols`);
-    console.log(`[Market Data] ℹ️  Using PREDICTED funding rates for filtering/ranking`);
   }
 
   return {
     bidAskSpreads,
     perpSpotSpreads,
-    volumes: volumesUSDC,
-    fundingRates: fundingRatesHistory,
-    predictedFundingRates
+    volumes,
+    fundingRates: fundingRatesHistory
   };
 }
 
@@ -113,8 +101,6 @@ export function filterOpportunities(marketData, thresholds) {
   const perpSpotMap = new Map(marketData.perpSpotSpreads.map(s => [s.perpSymbol, s]));
   const volumeMap = new Map(marketData.volumes.map(v => [v.perpSymbol, v]));
   const fundingMap = new Map(marketData.fundingRates.map(f => [f.symbol, f]));
-  // CRITICAL: Use predicted funding rates for filtering/ranking decisions
-  const predictedFundingMap = marketData.predictedFundingRates || new Map();
 
   const results = [];
   const rejected = {
@@ -134,7 +120,6 @@ export function filterOpportunities(marketData, thresholds) {
     const perpSpot = perpSpotMap.get(symbol);
     const volume = volumeMap.get(symbol);
     const funding = fundingMap.get(symbol);
-    const predictedFunding = predictedFundingMap.get(symbol);
 
     // Check if all data is available
     if (!bidAsk || !perpSpot || !volume || !funding) {
@@ -252,36 +237,17 @@ export function filterOpportunities(marketData, thresholds) {
       continue;
     }
 
-    // CRITICAL: Filter by PREDICTED funding rate (what will be paid NEXT)
-    // Use predicted rate if available, otherwise fall back to historical average
-    const predictedRate = predictedFunding?.predictedAnnualizedRate;
+    // Decisions use the trailing 7-day average. It predicts the next 14 days far better than the
+    // one-hour predicted rate (corr 0.53 vs 0.23 on 2y of data; see tests/check-switch-calibration.js).
     const avgFundingRate = funding.history?.avg?.annualized ?? funding.annualizedRate;
-    const hasPredictedRate = predictedRate !== null && predictedRate !== undefined;
 
-    if ((hasPredictedRate && !isFiniteNumber(predictedRate)) || !isFiniteNumber(avgFundingRate)) {
-      rejected.funding.push({
-        symbol,
-        predictedFunding: hasPredictedRate && isFiniteNumber(predictedRate) ? predictedRate * 100 : null,
-        avgFunding: isFiniteNumber(avgFundingRate) ? avgFundingRate * 100 : null,
-        usedForFilter: null,
-        threshold: minFundingRatePercent,
-        error: 'non-finite funding'
-      });
+    if (!isFiniteNumber(avgFundingRate)) {
+      rejected.funding.push({ symbol, avgFunding: null, threshold: minFundingRatePercent, error: 'non-finite funding' });
       continue;
     }
 
-    // For filtering, use predicted rate (what we'll actually earn)
-    const filterFundingRate = hasPredictedRate ? predictedRate : avgFundingRate;
-    const filterFundingPercent = filterFundingRate * 100;
-
-    if (filterFundingPercent < minFundingRatePercent) {
-      rejected.funding.push({
-        symbol,
-        predictedFunding: predictedRate !== null && predictedRate !== undefined ? (predictedRate * 100) : null,
-        avgFunding: avgFundingRate * 100,
-        usedForFilter: filterFundingPercent,
-        threshold: minFundingRatePercent
-      });
+    if (avgFundingRate * 100 < minFundingRatePercent) {
+      rejected.funding.push({ symbol, avgFunding: avgFundingRate * 100, threshold: minFundingRatePercent });
       continue;
     }
 
@@ -292,26 +258,11 @@ export function filterOpportunities(marketData, thresholds) {
       perpSpot,
       volume,
       funding,
-      predictedFunding,  // Include predicted funding data
-      // Composite scores - use predicted rate for ranking (what we'll actually earn)
-      predictedFundingRate: predictedRate,
-      predictedFundingPercent: predictedRate !== null && predictedRate !== undefined ? (predictedRate * 100) : null,
       avgFundingRate: avgFundingRate,
       avgFundingPercent: avgFundingRate * 100,
-      // Use predicted for primary metric, fall back to average if not available
-      primaryFundingRate: filterFundingRate,
-      primaryFundingPercent: filterFundingPercent,
       totalVolumeUSDC: totalVolumeUSDC,
       maxBidAskSpread: maxBidAskPct,
-      perpSpotSpreadAbs: perpSpotSpreadPct,
-      // Quality score (higher = better)
-      // Weighted: funding 70%, liquidity 20%, spreads 10%
-      // CRITICAL: Use predicted funding for quality score (what we'll actually earn)
-      qualityScore: (
-        filterFundingPercent * 0.7 +
-        (Math.min(totalVolumeUSDC / minVolumeUSDC, 5) * 2) +  // Cap volume bonus at 5x threshold
-        ((maxBidAskSpreadPercent - maxBidAskPct) / maxBidAskSpreadPercent * 10) * 0.1
-      )
+      perpSpotSpreadAbs: perpSpotSpreadPct
     });
   }
 
@@ -334,22 +285,18 @@ export function filterOpportunities(marketData, thresholds) {
 }
 
 /**
- * Rank opportunities by PREDICTED funding rate (highest first)
- * CRITICAL: Uses predicted funding rate (what will be paid NEXT), not historical average
+ * Rank opportunities by 7-day average funding (highest first).
+ * Ties are common (many coins sit at the 10.95% APY baseline), so ties go to the more liquid pair.
  * @param {Object[]} opportunities - Array of opportunities
  * @returns {Object[]} Sorted opportunities
  */
 export function rankOpportunities(opportunities) {
   return opportunities.sort((a, b) => {
-    // Primary sort: by PRIMARY funding rate (predicted if available, else average)
-    // This is what we'll actually earn on the next funding payment
-    const fundingDiff = b.primaryFundingRate - a.primaryFundingRate;
+    const fundingDiff = b.avgFundingRate - a.avgFundingRate;
     if (Math.abs(fundingDiff) > 0.0001) {
       return fundingDiff;
     }
-
-    // Secondary sort: by quality score
-    return b.qualityScore - a.qualityScore;
+    return b.totalVolumeUSDC - a.totalVolumeUSDC;
   });
 }
 
@@ -364,25 +311,6 @@ export function selectBestOpportunity(opportunities) {
   }
 
   return opportunities[0];
-}
-
-/**
- * Check if a new opportunity is significantly better than current
- * @param {Object} currentOpportunity - Current position data
- * @param {Object} newOpportunity - New opportunity data
- * @param {number} minImprovementFactor - Minimum improvement factor (default 2x)
- * @returns {boolean} True if new is significantly better
- */
-export function isSignificantlyBetter(currentOpportunity, newOpportunity, minImprovementFactor = 2) {
-  if (!currentOpportunity || !newOpportunity) {
-    return false;
-  }
-
-  const currentFunding = currentOpportunity.avgFundingRate || currentOpportunity.annualizedFunding;
-  const newFunding = newOpportunity.avgFundingRate;
-
-  // Check if new funding is at least minImprovementFactor times better
-  return newFunding >= currentFunding * minImprovementFactor;
 }
 
 /**
@@ -425,7 +353,7 @@ export function formatOpportunityReport(filterResult, rankedOpportunities) {
     return lines.join('\n');
   }
 
-  lines.push(`Top ${Math.min(3, rankedOpportunities.length)} Opportunities (ranked by primary funding):`);
+  lines.push(`Top ${Math.min(3, rankedOpportunities.length)} Opportunities (ranked by 7d avg funding):`);
   lines.push('');
 
   for (let i = 0; i < Math.min(3, rankedOpportunities.length); i++) {
@@ -433,13 +361,11 @@ export function formatOpportunityReport(filterResult, rankedOpportunities) {
     const rank = i + 1;
 
     lines.push(`${rank}. ${opp.symbol}:`);
-    lines.push(`   Avg Funding: ${(opp.avgFundingPercent).toFixed(2)}% APY`);
-    lines.push(`   Predicted Funding: ${opp.predictedFundingPercent !== null ? opp.predictedFundingPercent.toFixed(2) : 'N/A'}% APY`);
+    lines.push(`   7d Avg Funding: ${(opp.avgFundingPercent).toFixed(2)}% APY`);
     lines.push(`   Current Funding: ${(opp.funding.annualizedRate * 100).toFixed(2)}% APY`);
     lines.push(`   Volume: $${(opp.totalVolumeUSDC / 1e6).toFixed(1)}M`);
     lines.push(`   Max Bid-Ask: ${(opp.maxBidAskSpread).toFixed(3)}%`);
     lines.push(`   PERP-SPOT Spread: ${(opp.perpSpotSpreadAbs).toFixed(3)}%`);
-    lines.push(`   Quality Score: ${opp.qualityScore.toFixed(2)}`);
     lines.push('');
   }
 

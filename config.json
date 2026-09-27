@@ -23,13 +23,12 @@
     "balanceUtilizationPercent": 95,
     "maxSlippagePercent": 5.0,
     "takerFeeRate": 0.00045,
-    "maxOrderSizeUSD": null,
-    "maxRetries": 3,
-    "orderWaitTime": 10000
+    "spotTakerFeeRate": 0.0007,
+    "maxOrderSizeUSD": null
   },
   "bot": {
-    "minHoldTimeDays": 14,
-    "improvementFactor": 2
+    "minHoldTimeDays": 7,
+    "switchHorizonDays": 8
   },
   "symbolMapping": {
     "perpToSpot": {
@@ -46,9 +45,7 @@
   "rateLimit": {
     "maxConcurrentRequests": 5,
     "delayBetweenBatches": 500,
-    "delayBetweenRequests": 250,
-    "maxRequestsPerSecond": 10,
-    "notes": "in milliseconds. Rate limiting to prevent API throttling. Conservative settings to avoid 429 errors. Orders are NOT affected by this (execute in parallel)."
+    "notes": "in milliseconds. Applies to market-data fetches only; orders are not throttled by this."
   },
   "thresholds": {
     "minVolumeUSDC": 75000000,
@@ -71,6 +68,6 @@
     "orderSizes": "Minimum order sizes per symbol defined in minOrderSizeUSD - positions will not open if insufficient capital",
     "slippage": "Maximum 5% slippage for market orders",
     "leverage": "Always uses 1x leverage (set per-pair before opening positions)",
-    "bot": "Bot behavior: minHoldTimeDays (minimum time before rebalancing, default 14), improvementFactor (required multiplier for switching positions, default 2x)"
+    "bot": "minHoldTimeDays: days before a non-emergency switch (default 7 = the 7d funding window). switchHorizonDays: effective days a 7d-avg funding gap is earned (default 8, measured; re-estimate with tests/check-switch-calibration.js). A switch happens only when gap x horizon beats fees + spread."
   }
 }

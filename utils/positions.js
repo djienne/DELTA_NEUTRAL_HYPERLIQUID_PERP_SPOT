@@ -13,6 +13,10 @@ import HyperliquidConnector from '../hyperliquid.js';
  *   (e.g., SHORT 1 BTC perp + LONG 1 BTC spot)
  */
 
+// Hyperliquid refuses orders below $10 notional, so smaller exposure can never be traded away.
+// Reporting it as exposure made the bot halt forever on sub-lot dust left after a close.
+export const MIN_NOTIONAL_USD = 10;
+
 /**
  * Get PERP positions from clearinghouse state
  *
@@ -77,7 +81,7 @@ export async function getPerpPositions(hyperliquid, user = null, options = {}) {
         // Determine side (positive size = long, negative = short)
         const side = size > 0 ? 'LONG' : size < 0 ? 'SHORT' : 'NONE';
 
-        if (!managedSet || managedSet.has(symbol)) {
+        if ((!managedSet || managedSet.has(symbol)) && Math.abs(positionValue) >= MIN_NOTIONAL_USD) {
           positions.push({
             symbol: symbol,
             side: side,
@@ -137,6 +141,8 @@ export async function getSpotBalances(hyperliquid, user = null, options = {}) {
     }, 2);
 
     const balances = [];
+    // Spot tokens are priced with their perp mid (same underlying; basis is filtered to <= 0.5%).
+    const mids = await hyperliquid.getAllMids();
 
     // Process spot balances
     if (data.balances && data.balances.length > 0) {
@@ -145,14 +151,19 @@ export async function getSpotBalances(hyperliquid, user = null, options = {}) {
         const total = parseFloat(balance.total || '0');
         const hold = parseFloat(balance.hold || '0');
         const available = total - hold;
+        const price = parseFloat(mids[HyperliquidConnector.spotToPerp(coin)]);
+        const valueUSD = total * price;
 
-        // Only include non-USDC balances with non-zero amounts
-        if (coin !== 'USDC' && total > 0 && (!managedSet || managedSet.has(coin))) {
+        // Only non-USDC balances worth at least MIN_NOTIONAL_USD (unknown price is kept, not dropped)
+        if (coin !== 'USDC' && total > 0 && (!managedSet || managedSet.has(coin)) &&
+            !(valueUSD < MIN_NOTIONAL_USD)) {
           balances.push({
             symbol: coin,
             total: total,
             hold: hold,
             available: available,
+            price: Number.isFinite(price) ? price : null,
+            valueUSD: Number.isFinite(valueUSD) ? valueUSD : null,
             token: balance.token
           });
         }

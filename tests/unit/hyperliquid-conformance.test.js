@@ -5,6 +5,10 @@ import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { ethers } from 'ethers';
 import HyperliquidConnector from '../../hyperliquid.js';
 import { UnknownOrderOutcomeError } from '../../utils/order-fill.js';
+import { updateLeverage } from '../../utils/leverage.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 class FakeWebSocket extends EventEmitter {
   constructor() {
@@ -222,6 +226,42 @@ test('order helpers validate cloid and forward expiresAfter', async () => {
   assert.equal(payloads.length, 1);
   assert.equal(payloads[0].expiresAfter, 456);
   assert.equal(payloads[0].vaultAddress, ethers.getAddress(vaultAddress));
+});
+
+test('is_vault=true in hyperliquid.env signs orders and leverage for the sub-account', async () => {
+  const subAccount = '0x00000000000000000000000000000000000000ab';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hl-env-'));
+  fs.writeFileSync(path.join(dir, 'hyperliquid.env'), `wallet_address=${subAccount}
+private_key=0x${'1'.repeat(64)}
+is_vault=True
+`);
+  const cwd = process.cwd();
+  process.chdir(dir);
+  let connector;
+  try {
+    connector = new HyperliquidConnector();
+  } finally {
+    process.chdir(cwd);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  assert.equal(connector.wallet, subAccount);
+
+  const sentVaults = [];
+  connector.getAssetId = async () => 0;
+  connector.getAssetInfo = () => ({ szDecimals: 3 });
+  connector.createOrderRest = async (action, nonce, vaultAddress) => {
+    sentVaults.push(vaultAddress);
+    return { status: 'ok' };
+  };
+  connector.fetchJsonWithTimeout = async (url, init) => {
+    sentVaults.push(JSON.parse(init.body).vaultAddress);
+    return { status: 'ok' };
+  };
+
+  await connector.createMarketOrder('BTC', 'sell', 0.001, { overrideMidPrice: 100000 });
+  await updateLeverage(connector, 'BTC', 1, false);
+
+  assert.deepEqual(sentVaults, [subAccount, ethers.getAddress(subAccount)]);
 });
 
 test('nextNonce is strictly monotonic within the same millisecond', () => {

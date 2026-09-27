@@ -12,8 +12,6 @@ const baseOpportunity = {
   funding: {
     fundingRate: 0.001
   },
-  predictedFunding: null,
-  predictedFundingRate: null,
   avgFundingRate: 0.1
 };
 
@@ -127,7 +125,7 @@ function makeHyperliquid(handler, options = {}) {
     wallet: '0x0000000000000000000000000000000000000001',
     signer: {},
     exchangeUrl: 'https://example.invalid/exchange',
-    fetch: async () => ({ ok: true, json: async () => ({ status: 'ok' }) }),
+    fetchJsonWithTimeout: async () => ({ status: 'ok' }),
     calls,
     async signAction() {
       return { r: '0x1', s: '0x2', v: 27 };
@@ -141,10 +139,8 @@ function makeHyperliquid(handler, options = {}) {
     getCoinForOrderbook(symbol, assetId) {
       return assetId >= 100 ? '@1' : symbol;
     },
-    async subscribeOrderbook() {},
-    getBidAsk(coin) {
-      const price = options.prices?.[coin] ?? 100;
-      return { bid: price - 1, ask: price + 1, mid: price, timestamp: Date.now() };
+    async getAllMids() {
+      return { BTC: '100', '@1': '100' };
     },
     async getMeta() {
       return { universe: [{ name: 'BTC' }] };
@@ -174,8 +170,6 @@ function makeHyperliquid(handler, options = {}) {
 }
 
 test('SPOT cleanup after PERP failure is not reduce-only and uses override price', async () => {
-  const originalFetch = global.fetch;
-  global.fetch = async () => ({ ok: true, json: async () => ({ status: 'ok' }) });
 
   const hyperliquid = makeHyperliquid(({ symbol, side }) => {
     if (symbol === 'BTC' && side === 'sell') return failed('perp failed');
@@ -196,12 +190,9 @@ test('SPOT cleanup after PERP failure is not reduce-only and uses override price
   assert.equal(cleanup.options.reduceOnly, false);
   assert.equal(cleanup.options.overrideMidPrice, 100);
 
-  global.fetch = originalFetch;
 });
 
 test('PERP cleanup after SPOT failure is reduce-only and uses override price', async () => {
-  const originalFetch = global.fetch;
-  global.fetch = async () => ({ ok: true, json: async () => ({ status: 'ok' }) });
 
   const hyperliquid = makeHyperliquid(({ symbol, side }) => {
     if (symbol === 'BTC' && side === 'sell') return filled('1');
@@ -222,12 +213,9 @@ test('PERP cleanup after SPOT failure is reduce-only and uses override price', a
   assert.equal(cleanup.options.reduceOnly, true);
   assert.equal(cleanup.options.overrideMidPrice, 100);
 
-  global.fetch = originalFetch;
 });
 
 test('imbalanced partial fills are closed with actual filled sizes', async () => {
-  const originalFetch = global.fetch;
-  global.fetch = async () => ({ ok: true, json: async () => ({ status: 'ok' }) });
 
   const hyperliquid = makeHyperliquid(({ symbol, side, index }) => {
     if (index === 0 && symbol === 'BTC' && side === 'sell') return filled('1');
@@ -249,12 +237,9 @@ test('imbalanced partial fills are closed with actual filled sizes', async () =>
   assert.equal(cleanupPerp.size, 1);
   assert.equal(cleanupPerp.options.reduceOnly, true);
 
-  global.fetch = originalFetch;
 });
 
 test('equal partial open fills below threshold are closed instead of accepted', async () => {
-  const originalFetch = global.fetch;
-  global.fetch = async () => ({ ok: true, json: async () => ({ status: 'ok' }) });
 
   const hyperliquid = makeHyperliquid(({ symbol, side, index }) => {
     if (index === 0 && symbol === 'BTC' && side === 'sell') return filled('0.5');
@@ -274,7 +259,6 @@ test('equal partial open fills below threshold are closed instead of accepted', 
   assert.equal(cleanupSpot.size, 0.5);
   assert.equal(cleanupPerp.size, 0.5);
 
-  global.fetch = originalFetch;
 });
 
 test('rejected PERP open request reconciles and closes filled SPOT leg', async () => {
@@ -346,5 +330,35 @@ test('close retries remaining on-chain PERP exposure after rejected close reques
   }, baseConfig);
 
   assert.equal(result.success, true);
+  assert.equal(hyperliquid.calls.filter(call => call.symbol === 'BTC' && call.side === 'buy').length, 2);
+});
+
+test('close sizes from on-chain balances and succeeds after a partial fill plus retry', async () => {
+  const hyperliquid = makeHyperliquid(({ symbol, side, index }) => {
+    if (index === 0 && symbol === 'BTC' && side === 'buy') return filled('0.5');
+    if (symbol === 'UBTC' && side === 'sell') return filled('0.9993');
+    if (symbol === 'BTC' && side === 'buy') return filled('0.5');
+    throw new Error(`Unexpected order ${symbol} ${side}`);
+  }, {
+    perpPositions: [
+      { position: { coin: 'BTC', szi: '-1', entryPx: '100', positionValue: '100' } }
+    ],
+    // Spot buy fee was taken in UBTC, so the wallet holds less than the recorded fill
+    spotBalances: [{ coin: 'UBTC', total: '0.9993', hold: '0' }]
+  });
+
+  const result = await closeDeltaNeutralPosition(hyperliquid, {
+    symbol: 'BTC',
+    perpSymbol: 'BTC',
+    spotSymbol: 'UBTC',
+    perpSize: 1,
+    spotSize: 1,
+    perpEntryPrice: 100,
+    spotEntryPrice: 100,
+    openTime: Date.now() - 1000
+  }, baseConfig);
+
+  assert.equal(result.success, true);
+  assert.equal(hyperliquid.calls.find(call => call.symbol === 'UBTC').size, 0.9993);
   assert.equal(hyperliquid.calls.filter(call => call.symbol === 'BTC' && call.side === 'buy').length, 2);
 });

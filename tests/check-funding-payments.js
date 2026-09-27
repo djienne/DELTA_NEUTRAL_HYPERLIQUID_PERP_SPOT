@@ -40,7 +40,7 @@ async function main() {
 
   if (!hyperliquid.wallet) {
     console.error('❌ Error: Wallet address not configured');
-    console.error('   Please set HL_WALLET in .env file');
+    console.error('   Please set wallet_address in hyperliquid.env');
     process.exit(1);
   }
 

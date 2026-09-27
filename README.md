@@ -13,23 +13,23 @@ An automated Node.js trading bot that earns funding rate arbitrage on Hyperliqui
 ### Prerequisites
 - Node.js 18+ (native) or Docker
 - Hyperliquid account with API key
-- PERP and SPOT balances (~50/50 split recommended)
-- Preferably a dedicated account
+- USDC split ~50/50 between PERP and SPOT: the position size is min(PERP, SPOT) × 95%, and the API key cannot move funds
+- **A dedicated account**: the bot treats every PERP position and SPOT balance of the configured pairs as its own, and will hedge, close or resize them
 
 ### Option 1: Native Node.js
 
 ```bash
 npm install
-cp .env.example .env
-# Edit .env with your HL_WALLET and HL_PRIVATE_KEY
+cp hyperliquid.env.example hyperliquid.env
+# Edit hyperliquid.env: wallet_address, private_key, is_vault
 node bot.js
 ```
 
 ### Option 2: Docker
 
 ```bash
-cp .env.example .env
-# Edit .env with your HL_WALLET and HL_PRIVATE_KEY
+cp hyperliquid.env.example hyperliquid.env
+# Edit hyperliquid.env (mounted read-only into the container, never copied into the image)
 docker compose build
 docker compose up -d
 docker compose logs -f
@@ -68,14 +68,16 @@ The bot uses **Hyperliquid API key** (from More → API) which can only trade, n
 - Earn: Funding payments every hour from longs paying people holding short positions (when fundings are positive, that is most of the time)
 
 **The bot automatically**:
-- Selects best opportunities by predicted funding when available, with 7-day average funding as context
+- Ranks pairs by **7-day average funding** (the one-hour rate is too noisy to predict the next weeks)
 - Filters by liquidity ($75M+ volume, tight spreads)
 - Sets leverage to 1x isolated per-pair before opening
 - Opens positions using 95% of balance
-- Holds for minimum 2 weeks (configurable)
-- Switches if 2x better opportunity found
-- Closes immediately if funding turns negative, even before the normal minimum hold time
+- Holds at least 7 days (configurable), then **switches only if the expected gain beats the cost**:
+  `(candidate 7d avg − held 7d avg) × switchHorizonDays > taker fees on 4 legs + spreads` (≈12 APY-point gap at base fees)
+- Closes a position whose 7d average turned negative when its expected loss over the horizon exceeds the closing cost, even inside the minimum hold
 - Rebalances imbalanced positions at startup
+
+The switch parameters were measured on 2 years of Hyperliquid funding history (a 7d-average gap is worth ≈8 days of funding over the next 14 days) and checked out-of-sample. Re-run `node tests/check-switch-calibration.js` (read-only) every month or so and update `config.json` only if the estimate leaves its plateau.
 
 ---
 
@@ -83,8 +85,8 @@ The bot uses **Hyperliquid API key** (from More → API) which can only trade, n
 
 ### Market Analysis
 ```bash
-node tests/check-funding-rates.js      # Current funding rates
-node tests/check-funding-history.js    # 7-day averages
+node tests/check-funding-rates.js      # Funding accruing this hour
+node tests/check-funding-history.js    # 7-day averages (what the bot trades on)
 node tests/check-positions.js          # Your positions
 node tests/check-24h-volumes.js        # Trading volumes
 ```
@@ -98,28 +100,30 @@ node tests/hedge-positions.js --execute   # Fix imbalances
 
 ### Testing
 ```bash
-node tests/test-rebalancing.js         # Test position switching logic
-node tests/test-bot-comprehensive.js   # Test hedge functionality
+npm test                                 # Unit tests (no network, no orders)
+node tests/check-switch-calibration.js   # Re-estimate switch parameters from public history (read-only)
 ```
 
 ---
 
 ## Configuration
 
-**Environment (`.env`)**:
+**Credentials (`hyperliquid.env`, gitignored)**:
 ```bash
-HL_WALLET=0x...           # Your EVM wallet address
-HL_PRIVATE_KEY=0x...      # API key from Hyperliquid (More → API)
+wallet_address=0x...   # account the bot trades (the sub-account address if is_vault=true)
+private_key=0x...      # API wallet key from Hyperliquid (More → API)
+is_vault=false         # true for a sub-account/vault: orders and leverage are signed with vaultAddress
 ```
+For a sub-account, create the API key on the master account. Move USDC between the sub-account's PERP and SPOT from the master in the Hyperliquid UI.
 
 **Bot Config (`config.json`)**:
 - `trading.pairs`: Symbols to trade (BTC, ETH, SOL, etc.)
 - `trading.balanceUtilizationPercent`: Use 95% of balance
 - `trading.maxOrderSizeUSD`: Optional hard cap for each new position size (`null` means uncapped)
 - `trading.maxSlippagePercent`: Market order slippage budget, expressed as a percent
-- `trading.takerFeeRate`: Fallback taker fee estimate used when live fills do not include fee data
-- `bot.minHoldTimeDays`: Hold time before rebalancing (default: 14)
-- `bot.improvementFactor`: Required improvement to switch (default: 2x)
+- `trading.takerFeeRate` / `trading.spotTakerFeeRate`: Taker fee per leg (perp 0.045%, spot 0.07% at base tier); used by the switch rule and when fills lack fee data
+- `bot.minHoldTimeDays`: Minimum hold before a switch (default: 7)
+- `bot.switchHorizonDays`: Days of a 7d-average funding gap expected to be earned (default: 8, measured)
 - `thresholds.minVolumeUSDC`: Min 24h volume (default: $75M)
 - `thresholds.minFundingRatePercent`: Min funding APY (default: 5%)
 - `risk.minFillRatio`: Minimum fill ratio required before an order is treated as complete
@@ -129,11 +133,11 @@ HL_PRIVATE_KEY=0x...      # API key from Hyperliquid (More → API)
 
 ## Key Features
 
-* ✅ **Automated Selection**: Ranks opportunities by predicted funding when available
+* ✅ **Automated Selection**: Ranks opportunities by 7-day average funding
 * ✅ **Parallel Execution**: Opens PERP+SPOT simultaneously
 * ✅ **State Persistence**: Recovers positions after restart
 * ✅ **Auto-fixing**: Fixes imbalanced positions at startup
-* ✅ **Negative Funding Protection**: 4-layer defense, auto-switches or closes
+* ✅ **Cost-Aware Switching**: Switches or closes only when the expected funding gain beats fees + spread
 * ✅ **Quality Filters**: Volume, spreads, funding thresholds
 * ✅ **Real-time Monitoring**: Status updates every 2 minutes
 * ✅ **Funding History**: Tracks accumulated earnings
@@ -160,7 +164,7 @@ bot.js (main loop)
   └─ hedge.js → auto-rebalancing
 ```
 
-**Utilities**: `funding.js`, `volume.js`, `spread.js`, `arbitrage.js`, `positions.js`, `leverage.js`, `symbols.js`
+**Utilities**: `position-decision.js` (switch rule), `funding.js`, `volume.js`, `spread.js`, `arbitrage.js`, `positions.js`, `leverage.js`, `risk.js`
 
 **Connector**: `hyperliquid.js` (WebSocket + REST API, EIP-712 signatures, rate limiting)
 
@@ -168,26 +172,4 @@ bot.js (main loop)
 
 ## Detailed Documentation
 
-See [CLAUDE.md](CLAUDE.md) for complete technical documentation including:
-- Detailed bot decision flow
-- Position sizing formulas
-- State management
-- Order execution details
-- Hedge utility documentation
-- Test coverage details
-- Hyperliquid API specifics
-- Common pitfalls and fixes
-
----
-
-
-
-
-
-
-
-
-
-
-
-
+See [CLAUDE.md](CLAUDE.md) for the decision flow, order-execution rules, Hyperliquid API specifics and known pitfalls.

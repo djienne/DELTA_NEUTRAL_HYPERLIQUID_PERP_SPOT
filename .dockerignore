@@ -4,12 +4,15 @@
 
 # Environment
 .env
+*.env
 
 # Dependencies
 node_modules
 
-# Runtime state
+# Runtime state (mounted as a volume, never baked into the image)
 bot-state.json
+data/
+_*.txt
 
 # Data files
 *.csv
@@ -25,10 +28,6 @@ logs/
 README.md
 CLAUDE.md
 docs/
-
-# Tests (include only if needed for production)
-# Uncomment to exclude tests from Docker image:
-# tests/
 
 # IDE
 .vscode

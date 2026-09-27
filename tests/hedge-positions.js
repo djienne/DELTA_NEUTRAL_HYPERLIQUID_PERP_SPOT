@@ -1,5 +1,6 @@
 import HyperliquidConnector from '../hyperliquid.js';
 import { analyzeHedgeNeeds, autoHedgeAll, formatHedgeReport } from '../utils/hedge.js';
+import { requireLiveTradingTest } from '../utils/live-guard.js';
 import fs from 'fs';
 
 /**
@@ -47,6 +48,7 @@ async function main() {
 
   } else if (mode === '--execute' || mode === '-e') {
     // Execute - actually create hedges
+    requireLiveTradingTest('tests/hedge-positions.js --execute');
     console.log('[Mode] EXECUTE - Creating hedges for real');
     console.log();
 

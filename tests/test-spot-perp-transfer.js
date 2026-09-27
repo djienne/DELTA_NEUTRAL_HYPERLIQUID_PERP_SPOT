@@ -1,10 +1,7 @@
 import { requireLiveTradingTest } from '../utils/live-guard.js';
 requireLiveTradingTest('tests/test-spot-perp-transfer.js');
 import { ethers } from 'ethers';
-import dotenv from 'dotenv';
-import fetch from 'node-fetch';
-
-dotenv.config();
+import HyperliquidConnector from '../hyperliquid.js';
 
 /**
  * Test script to transfer USDC between Spot and Perp accounts on Hyperliquid
@@ -14,8 +11,11 @@ dotenv.config();
  * 2. Transfer funds from Spot to Perp (or vice versa)
  */
 
-const HL_WALLET = process.env.HL_WALLET;
-const HL_PRIVATE_KEY = process.env.HL_PRIVATE_KEY;
+const { wallet: HL_WALLET, privateKey: HL_PRIVATE_KEY, vaultAddress } = new HyperliquidConnector();
+if (vaultAddress) {
+  // usdClassTransfer applies to the signer's own account, not the sub-account
+  throw new Error('Sub-account/vault: move USDC between Spot and Perp from the master account in the Hyperliquid UI');
+}
 const API_URL = 'https://api.hyperliquid.xyz/exchange';
 
 // Configuration
@@ -79,7 +79,7 @@ async function transferBetweenSpotAndPerp(amount, toPerp) {
 
   // Validate credentials
   if (!HL_WALLET || !HL_PRIVATE_KEY) {
-    throw new Error('Missing HL_WALLET or HL_PRIVATE_KEY in .env file');
+    throw new Error('Missing wallet_address or private_key in hyperliquid.env');
   }
 
   // Create action

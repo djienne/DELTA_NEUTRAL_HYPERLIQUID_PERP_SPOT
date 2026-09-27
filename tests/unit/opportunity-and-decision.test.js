@@ -1,14 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { filterOpportunities } from '../../utils/opportunity.js';
-import {
-  getCurrentPositionFundingSignal,
-  getPositiveReopenOpportunity,
-  isNegativeFundingSignal
-} from '../../utils/position-decision.js';
-import { fetchWithConcurrencyLimit as limitVolumeTasks } from '../../utils/volume.js';
-import { fetchWithConcurrencyLimit as limitSpreadTasks } from '../../utils/spread.js';
-import { fetchWithConcurrencyLimit as limitArbitrageTasks } from '../../utils/arbitrage.js';
+import { getCurrentPositionFundingSignal, switchEdge } from '../../utils/position-decision.js';
+import { fetchWithConcurrencyLimit } from '../../utils/spread.js';
 
 function baseMarketData(overrides = {}) {
   return {
@@ -30,9 +24,6 @@ function baseMarketData(overrides = {}) {
         history: { avg: { annualized: 0.1 } }
       }
     ],
-    predictedFundingRates: new Map([
-      ['BTC', { predictedAnnualizedRate: 0.12 }]
-    ]),
     ...overrides
   };
 }
@@ -64,14 +55,12 @@ test('opportunity filtering keeps valid complete spread data', () => {
 
   assert.equal(result.opportunities.length, 1);
   assert.equal(result.opportunities[0].symbol, 'BTC');
-  assert.equal(result.opportunities[0].primaryFundingPercent, 12);
+  assert.equal(result.opportunities[0].avgFundingPercent, 10);
 });
 
-test('opportunity filtering rejects non-finite predicted funding', () => {
+test('opportunity filtering rejects non-finite 7d funding', () => {
   const result = filterOpportunities(baseMarketData({
-    predictedFundingRates: new Map([
-      ['BTC', { predictedAnnualizedRate: NaN }]
-    ])
+    fundingRates: [{ symbol: 'BTC', fundingRate: 0.001, annualizedRate: NaN, history: { avg: { annualized: NaN } } }]
   }), {
     maxSpreadPercent: 0.15,
     maxPerpSpotSpreadPercent: 0.5,
@@ -84,21 +73,11 @@ test('opportunity filtering rejects non-finite predicted funding', () => {
   assert.equal(result.rejected.funding[0].error, 'non-finite funding');
 });
 
-test('position funding signal detects negative funding independently of hold time', () => {
+test('held position is judged on its 7d average even when filtered out of the ranking', () => {
   const analysis = {
     rankedOpportunities: [],
-    best: { symbol: 'ETH', primaryFundingPercent: 8 },
     marketData: {
-      fundingRates: [
-        {
-          symbol: 'BTC',
-          annualizedRate: 0.1,
-          history: { avg: { annualized: 0.1 } }
-        }
-      ],
-      predictedFundingRates: new Map([
-        ['BTC', { predictedAnnualizedRate: -0.02 }]
-      ])
+      fundingRates: [{ symbol: 'BTC', annualizedRate: 0.3, history: { avg: { annualized: -0.02 } } }]
     }
   };
 
@@ -106,12 +85,21 @@ test('position funding signal detects negative funding independently of hold tim
 
   assert.equal(signal.available, true);
   assert.equal(signal.fundingPercent, -2);
-  assert.equal(signal.fundingType, 'predicted');
-  assert.equal(isNegativeFundingSignal(signal), true);
-  assert.equal(getPositiveReopenOpportunity(analysis).symbol, 'ETH');
 });
 
-async function assertLimiterCapsConcurrency(limiter) {
+test('switchEdge acts only when the expected funding gain beats fees and spread', () => {
+  const config = { bot: { switchHorizonDays: 8 } };
+  const candidate = apy => ({ avgFundingRate: apy, bidAsk: { perpSpreadPercent: 0.02, spotSpreadPercent: 0.03 } });
+
+  // Switching needs a large gap: 5 APY points does not pay ~0.28% round-trip cost, 20 points does
+  assert.ok(switchEdge(0.11, candidate(0.16), config) < 0);
+  assert.ok(switchEdge(0.11, candidate(0.31), config) > 0);
+  // Closing a negative position: mild -3% APY is cheaper to hold, -30% APY is worth closing
+  assert.ok(switchEdge(-0.03, null, config) < 0);
+  assert.ok(switchEdge(-0.30, null, config) > 0);
+});
+
+test('concurrency helper starts only the configured number of tasks', async () => {
   let active = 0;
   let maxActive = 0;
   const tasks = Array.from({ length: 6 }, (_, index) => async () => {
@@ -122,20 +110,8 @@ async function assertLimiterCapsConcurrency(limiter) {
     return index;
   });
 
-  const results = await limiter(tasks, 2, 0);
+  const results = await fetchWithConcurrencyLimit(tasks, 2, 0);
 
   assert.deepEqual(results, [0, 1, 2, 3, 4, 5]);
   assert.equal(maxActive, 2);
-}
-
-test('volume concurrency helper starts only the configured number of tasks', async () => {
-  await assertLimiterCapsConcurrency(limitVolumeTasks);
-});
-
-test('spread concurrency helper starts only the configured number of tasks', async () => {
-  await assertLimiterCapsConcurrency(limitSpreadTasks);
-});
-
-test('arbitrage concurrency helper starts only the configured number of tasks', async () => {
-  await assertLimiterCapsConcurrency(limitArbitrageTasks);
 });

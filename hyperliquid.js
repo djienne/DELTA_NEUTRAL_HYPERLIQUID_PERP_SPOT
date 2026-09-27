@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import fetch from 'node-fetch';
+import fs from 'fs';
 import { EventEmitter } from 'events';
 import { SlidingWindowRateLimiter } from './utils/rate-limiter.js';
 import { ethers } from 'ethers';
@@ -7,7 +7,7 @@ import dotenv from 'dotenv';
 import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { UnknownOrderOutcomeError } from './utils/order-fill.js';
 
-dotenv.config();
+const CREDENTIALS_FILE = 'hyperliquid.env';  // wallet_address, private_key, is_vault (relative to the working dir)
 
 class HyperliquidConnector extends EventEmitter {
   constructor(options = {}) {
@@ -24,9 +24,15 @@ class HyperliquidConnector extends EventEmitter {
       this.exchangeUrl = 'https://api.hyperliquid-testnet.xyz/exchange';
     }
 
-    // Load credentials from environment or options
-    this.wallet = options.wallet !== undefined ? options.wallet : process.env.HL_WALLET;
-    this.privateKey = options.privateKey !== undefined ? options.privateKey : process.env.HL_PRIVATE_KEY;
+    // Credentials come from hyperliquid.env unless a wallet is passed explicitly (tests, read-only tools).
+    // is_vault=true (sub-account or vault): wallet_address is the account queried for balances and is named as
+    // vaultAddress in every signed action; without it the API key would trade its master account instead.
+    const creds = options.wallet === undefined && fs.existsSync(CREDENTIALS_FILE)
+      ? dotenv.parse(fs.readFileSync(CREDENTIALS_FILE))
+      : {};
+    this.wallet = options.wallet !== undefined ? options.wallet : creds.wallet_address;
+    this.privateKey = options.privateKey !== undefined ? options.privateKey : creds.private_key;
+    this.vaultAddress = options.vaultAddress ?? (creds.is_vault?.toLowerCase() === 'true' ? this.wallet : null);
     this.fetch = options.fetch || fetch;
 
     // Initialize signer if private key is provided
@@ -90,11 +96,9 @@ class HyperliquidConnector extends EventEmitter {
 
     // REST: max 1200 weight per minute (l2Book has weight 2)
     this.restRateLimiter = new SlidingWindowRateLimiter({
-      maxRequests: 600, // 600 requests × 2 weight = 1200
+      maxRequests: 1200, // counted in request weight (see infoRequest)
       windowMs: 60000 // 1 minute
     });
-
-    this.restRateLimiter.maxRequests = 1200;
 
     // Track inflight WebSocket requests
     this.maxInflightRequests = options.maxInflightRequests || 90; // Max 100, use 90 for buffer
@@ -563,81 +567,6 @@ class HyperliquidConnector extends EventEmitter {
   }
 
   /**
-   * Request clearinghouse state (balances) via WebSocket post
-   * @param {string} user - Wallet address
-   * @returns {Promise<object>} Payload object { type: 'clearinghouseState', data: { ... } }
-   */
-  async requestClearinghouseStateWs(user) {
-    if (!user && !this.wallet) {
-      throw new Error('User address required for clearinghouse state');
-    }
-
-    // Check inflight request limit
-    if (this.pendingRequests.size >= this.maxInflightRequests) {
-      throw new Error('Too many inflight requests');
-    }
-
-    // Check rate limit
-    if (!this.wsRateLimiter.canRequest()) {
-      throw new Error('Rate limit exceeded');
-    }
-
-    return new Promise((resolve, reject) => {
-      if (!this.connected) {
-        reject(new Error('Not connected'));
-        return;
-      }
-
-      // Consume rate limit token
-      if (!this.wsRateLimiter.tryRequest()) {
-        reject(new Error('Rate limit exceeded'));
-        return;
-      }
-
-      const id = ++this.requestId;
-
-      const request = {
-        method: 'post',
-        id,
-        request: {
-          type: 'info',
-          payload: {
-            type: 'clearinghouseState',
-            user: user || this.wallet
-          }
-        }
-      };
-
-      // Store pending request with timeout
-      const timeoutId = setTimeout(() => {
-        if (this.pendingRequests.has(id)) {
-          this.pendingRequests.delete(id);
-          reject(new Error('Request timeout'));
-        }
-      }, 10000);
-
-      this.pendingRequests.set(id, {
-        resolve,
-        reject,
-        timeout: timeoutId,
-        kind: 'info',
-        context: { requestType: 'clearinghouseState', user: user || this.wallet }
-      });
-
-      // Send request
-      try {
-        this.ws.send(JSON.stringify(request));
-      } catch (error) {
-        if (this.pendingRequests.has(id)) {
-          clearTimeout(this.pendingRequests.get(id).timeout);
-          this.pendingRequests.delete(id);
-        }
-        reject(error);
-      }
-    });
-  }
-
-  /**
    * Request L2 orderbook via REST API
    */
   async requestL2BookRest(coin, options = {}) {
@@ -993,21 +922,6 @@ class HyperliquidConnector extends EventEmitter {
     }
     this.pendingRequests.clear();
   }
-
-  /**
-   * Get connection status
-   */
-  getStatus() {
-    return {
-      connected: this.connected,
-      reconnecting: this.reconnecting,
-      reconnectAttempts: this.reconnectAttempts,
-      useRestFallback: this.useRestFallback,
-      subscriptions: Array.from(this.subscriptions),
-      orderbooks: Array.from(this.orderbooks.keys())
-    };
-  }
-
   /**
    * Get asset metadata (to find asset IDs and szDecimals)
    */
@@ -1207,64 +1121,6 @@ class HyperliquidConnector extends EventEmitter {
       // If input is spot symbol, convert to perp
       return HyperliquidConnector.spotToPerp(symbol);
     }
-  }
-
-  /**
-   * Fetch candle snapshot data
-   * @param {string} coin - Coin symbol (for perp) or format like "@151" for spot
-   * @param {string} interval - Candle interval: "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1d", "3d", "1w", "1M"
-   * @param {number} startTime - Start time in epoch milliseconds
-   * @param {number} endTime - End time in epoch milliseconds
-   * @returns {Promise<Array>} Array of candle objects
-   */
-  async getCandleSnapshot(coin, interval = '1h', startTime, endTime) {
-    const payload = {
-      type: 'candleSnapshot',
-      req: {
-        coin: coin,
-        interval: interval,
-        startTime: startTime,
-        endTime: endTime
-      }
-    };
-
-    return await this.infoRequest(payload, 20);
-  }
-
-  /**
-   * Calculate 24-hour trading volume for a symbol
-   * @param {string} symbol - Symbol (perp or spot format)
-   * @param {boolean} isSpot - Whether this is a spot symbol
-   * @returns {Promise<Object>} Volume data: { volume24h, startTime, endTime, numCandles }
-   */
-  async get24HourVolume(symbol, isSpot = false) {
-    const endTime = Date.now();
-    const startTime = endTime - (24 * 60 * 60 * 1000); // 24 hours ago
-
-    // For spot, determine the correct orderbook coin format
-    let coin = symbol;
-    if (isSpot) {
-      const assetId = await this.getAssetId(symbol, true);
-      coin = this.getCoinForOrderbook(symbol, assetId);
-    }
-
-    // Fetch hourly candles for the last 24 hours
-    const candles = await this.getCandleSnapshot(coin, '1h', startTime, endTime);
-
-    // Sum up volumes
-    let totalVolume = 0;
-    for (const candle of candles) {
-      totalVolume += parseFloat(candle.v || 0);
-    }
-
-    return {
-      symbol: symbol,
-      volume24h: totalVolume,
-      startTime: startTime,
-      endTime: endTime,
-      numCandles: candles.length,
-      candles: candles
-    };
   }
 
   /**
@@ -1578,8 +1434,9 @@ class HyperliquidConnector extends EventEmitter {
     // Round size to proper lot size (szDecimals)
     const sizeStr = this.roundSize(size, assetInfo.szDecimals, options.sizeRoundingMode || 'nearest');
 
-    // Check minimum notional ($10 minimum per Hyperliquid docs)
-    const notional = parseFloat(limitPriceStr) * parseFloat(sizeStr);
+    // Check minimum notional ($10 minimum per Hyperliquid docs). Valued at mid, not at the
+    // slippage-adjusted limit, which would reject a $10.40 sell as $9.88.
+    const notional = midPrice * parseFloat(sizeStr);
     if (notional < 10) {
       throw new Error(`Order notional ($${notional.toFixed(2)}) is below minimum ($10). Increase order size.`);
     }
@@ -1627,9 +1484,9 @@ class HyperliquidConnector extends EventEmitter {
 
     // Try WebSocket first if connected, otherwise use REST
     if (this.connected && !options.useRest) {
-      return await this.createOrderWebSocket(action, nonce, options.vaultAddress, options.expiresAfter, orderContext);
+      return await this.createOrderWebSocket(action, nonce, options.vaultAddress ?? this.vaultAddress, options.expiresAfter, orderContext);
     } else {
-      return await this.createOrderRest(action, nonce, options.vaultAddress, options.expiresAfter, orderContext);
+      return await this.createOrderRest(action, nonce, options.vaultAddress ?? this.vaultAddress, options.expiresAfter, orderContext);
     }
   }
 
@@ -1743,82 +1600,6 @@ class HyperliquidConnector extends EventEmitter {
       return result;
     } catch (error) {
       console.error('[Hyperliquid] REST order error:', error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Close position (market order with reduce-only)
-   *
-   * @param {string} coin - Coin symbol
-   * @param {string} side - 'buy' to close short, 'sell' to close long
-   * @param {number} size - Position size to close
-   * @returns {Promise<object>} Order result
-   */
-  async closePosition(coin, side, size) {
-    return await this.createMarketOrder(coin, side, size, { reduceOnly: true });
-  }
-
-  /**
-   * Get account balance and margin information
-   * @param {string} user - User address (defaults to configured wallet)
-   * @returns {Promise<object>} Balance information
-   */
-  async getBalance(user = null) {
-    user = user || this.wallet;
-
-    if (!user) {
-      throw new Error('User address required to get balance');
-    }
-
-    try {
-      const data = await this.infoRequest({
-        type: 'clearinghouseState',
-        user: user
-      }, 2);
-
-      // Parse and return balance information
-      const marginSummary = data.marginSummary || {};
-      const crossMarginSummary = data.crossMarginSummary || {};
-
-      return {
-        // Total account value (equity)
-        accountValue: parseFloat(marginSummary.accountValue || '0'),
-
-        // Available to withdraw
-        withdrawable: parseFloat(data.withdrawable || '0'),
-
-        // Total margin used
-        totalMarginUsed: parseFloat(marginSummary.totalMarginUsed || '0'),
-
-        // Total raw USD balance
-        totalRawUsd: parseFloat(marginSummary.totalRawUsd || '0'),
-
-        // Total notional position value
-        totalNtlPos: parseFloat(marginSummary.totalNtlPos || '0'),
-
-        // Cross margin summary
-        crossMargin: {
-          accountValue: parseFloat(crossMarginSummary.accountValue || '0'),
-          totalMarginUsed: parseFloat(crossMarginSummary.totalMarginUsed || '0'),
-          totalRawUsd: parseFloat(crossMarginSummary.totalRawUsd || '0'),
-          totalNtlPos: parseFloat(crossMarginSummary.totalNtlPos || '0')
-        },
-
-        // Available for trading (withdrawable + margin used)
-        availableForTrading: parseFloat(data.withdrawable || '0') + parseFloat(marginSummary.totalMarginUsed || '0'),
-
-        // Cross maintenance margin
-        crossMaintenanceMarginUsed: parseFloat(data.crossMaintenanceMarginUsed || '0'),
-
-        // Asset positions (for position management)
-        assetPositions: data.assetPositions || [],
-
-        // Timestamp
-        timestamp: data.time || Date.now()
-      };
-    } catch (error) {
-      console.error('[Hyperliquid] Error fetching balance:', error.message);
       throw error;
     }
   }

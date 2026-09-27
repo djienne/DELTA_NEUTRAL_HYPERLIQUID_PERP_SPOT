@@ -9,7 +9,7 @@ import {
   getMinFillRatio,
   getStartupCleanupMode
 } from '../../utils/risk.js';
-import { analyzeDeltaNeutral } from '../../utils/positions.js';
+import { analyzeDeltaNeutral, getPerpPositions, getSpotBalances } from '../../utils/positions.js';
 
 test('maxSpreadPercent is the preferred bid-ask spread threshold key', () => {
   assert.equal(getMaxBidAskSpreadPercent({ maxSpreadPercent: 0.25 }), 0.25);
@@ -69,4 +69,32 @@ test('delta-neutral analysis separates true hedges from imbalanced matches', () 
   assert.equal(analysis.hasDeltaNeutral, true);
   assert.equal(analysis.imbalancedPairs.find(pair => pair.symbol === 'ETH').imbalanceType, 'DOUBLE_LONG');
   assert.equal(analysis.imbalancedPairs.find(pair => pair.symbol === 'SOL').imbalanceType, 'EXCESS_PERP_SHORT');
+});
+
+test('exposure below the $10 order minimum is ignored as untradeable dust', async () => {
+  const hyperliquid = {
+    wallet: '0x1',
+    async getMeta() { return { universe: [{ name: 'BTC' }, { name: 'ETH' }] }; },
+    async getAllMids() { return { BTC: '100', ETH: '10' }; },
+    async infoRequest({ type }) {
+      if (type === 'clearinghouseState') {
+        return { assetPositions: [
+          { position: { coin: 'BTC', szi: '-0.5', positionValue: '50' } },
+          { position: { coin: 'ETH', szi: '-0.5', positionValue: '5' } }
+        ] };
+      }
+      return { balances: [
+        { coin: 'UBTC', total: '0.5', hold: '0' },     // $50: real exposure
+        { coin: 'UETH', total: '0.01', hold: '0' },    // $0.10: dust left after a close
+        { coin: 'UNKNOWN', total: '3', hold: '0' }     // no price: kept, never silently dropped
+      ] };
+    }
+  };
+
+  const perps = await getPerpPositions(hyperliquid);
+  const spots = await getSpotBalances(hyperliquid);
+
+  assert.deepEqual(perps.map(p => p.symbol), ['BTC']);
+  assert.deepEqual(spots.map(b => b.symbol), ['UBTC', 'UNKNOWN']);
+  assert.equal(spots[0].valueUSD, 50);
 });
