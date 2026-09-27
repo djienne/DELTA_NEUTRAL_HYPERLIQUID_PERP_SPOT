@@ -1,5 +1,5 @@
 import HyperliquidConnector from '../hyperliquid.js';
-import { getPerpPositions, getSpotBalances } from './positions.js';
+import { getPerpPositions, getSpotBalances, formatPrice } from './positions.js';
 import { getFundingRatesWithHistory } from './funding.js';
 import { get24HourVolumes } from './volume.js';
 import { getBidAskSpreads } from './spread.js';
@@ -71,7 +71,7 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
     if (perpPositions.length > 0) {
       lines.push(`   PERP Positions (${perpPositions.length}):`);
       for (const pos of perpPositions) {
-        lines.push(`     ${pos.symbol}: ${pos.side.toUpperCase()} ${pos.size} @ $${pos.entryPrice.toFixed(2)} (PnL: $${pos.unrealizedPnl.toFixed(2)})`);
+        lines.push(`     ${pos.symbol}: ${pos.side.toUpperCase()} ${pos.size} @ $${formatPrice(pos.entryPrice)} (PnL: $${pos.unrealizedPnl.toFixed(2)})`);
       }
     }
     if (spotBalances.length > 0) {

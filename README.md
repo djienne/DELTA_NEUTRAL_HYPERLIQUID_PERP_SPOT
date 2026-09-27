@@ -163,9 +163,8 @@ docker compose stop paper-bot                    # pause; the run continues wher
 **Known limitations**:
 - Your own orders don't move the book. Fine at these sizes; each fill walks every level it needs.
 - The oracle price is approximated by the 1-hour candle close for funding, and by 15-min trade highs for liquidation (slightly conservative).
-- Two points are unverified and assumed:
-  - funding lands in the isolated margin;
-  - spot buys are checked against the fill price, not the limit price. Orders that a strict limit-price check would reject are counted as `would_reject_strict` in the stats.
+- Funding lands in the isolated margin, not in withdrawable USDC (verified on the live account, 2026-09-27).
+- One point is unverified and assumed: spot buys are checked against the fill price, not the limit price. Orders that a strict limit-price check would reject are counted as `would_reject_strict` in the stats.
 - Fees are the config rates (base tier by default).
 - The simulated operator always answers in exactly 1 h. Pending responses survive restarts; transfers created by older versions that already debited the source settle without a second debit.
 

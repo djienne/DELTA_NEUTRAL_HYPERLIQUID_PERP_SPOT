@@ -2,7 +2,7 @@ import HyperliquidConnector from '../hyperliquid.js';
 import { setLeverageTo1x } from './leverage.js';
 import { getKnownFee, getSizeMismatchPercent, getOrderFees, normalizeOrderOutcome } from './order-fill.js';
 import { getMaxOpenHedgeMismatchPercent, getMinFillRatio, getTakerFees, getMaxBidAskSpreadPercent } from './risk.js';
-import { getPerpPositions, getSpotBalances, executableSize } from './positions.js';
+import { getPerpPositions, getSpotBalances, executableSize, formatPrice } from './positions.js';
 
 /**
  * Trading Utilities
@@ -98,7 +98,7 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
     throw new Error('Fresh entry books fail spread or basis filters');
   }
   if (verbose) {
-    console.log(`[Trade] Prices - PERP: $${perpMid.toFixed(2)}, SPOT: $${spotMid.toFixed(2)}`);
+    console.log(`[Trade] Prices - PERP: $${formatPrice(perpMid)}, SPOT: $${formatPrice(spotMid)}`);
   }
 
   // Get minimum notional from config (with fallback to 20 if not specified)
@@ -287,8 +287,8 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
 
     if (verbose) {
       console.log('[Trade] ✅ Both orders filled:');
-      console.log(`[Trade]   PERP: ${perpFillSz} @ $${perpFillPx.toFixed(2)}`);
-      console.log(`[Trade]   SPOT: ${spotFillSz} @ $${spotFillPx.toFixed(2)}`);
+      console.log(`[Trade]   PERP: ${perpFillSz} @ $${formatPrice(perpFillPx)}`);
+      console.log(`[Trade]   SPOT: ${spotFillSz} @ $${formatPrice(spotFillPx)}`);
     }
 
     return {

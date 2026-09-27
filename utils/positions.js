@@ -17,6 +17,9 @@ import { getSizeMismatchPercent } from './order-fill.js';
 // The connector's minimum order size. Dust remains inventory, even when it cannot be traded alone.
 export const MIN_NOTIONAL_USD = 10;
 
+/** Price for logs: 6 significant figures, so $0.004968 (PUMP) and $84776.5 (BTC) both stay readable. */
+export const formatPrice = p => Number.isFinite(p) ? String(Number(p.toPrecision(6))) : 'unknown';
+
 export async function executableSize(hyperliquid, symbol, isSpot, size, price) {
   if (!Number.isFinite(size) || size < 0 || !Number.isFinite(price) || price <= 0) {
     throw new Error(`Invalid exposure or price for ${symbol}`);

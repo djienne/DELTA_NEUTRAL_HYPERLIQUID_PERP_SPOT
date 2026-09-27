@@ -1,5 +1,5 @@
 import HyperliquidConnector from '../hyperliquid.js';
-import { getAllPositions, analyzeDeltaNeutral, positionsToCSV, deltaNeutralToCSV } from '../utils/positions.js';
+import { getAllPositions, analyzeDeltaNeutral, positionsToCSV, deltaNeutralToCSV, formatPrice } from '../utils/positions.js';
 import fs from 'fs';
 
 /**
@@ -45,7 +45,7 @@ async function checkPositions() {
 
     for (const pos of positions.perp) {
       const sizeStr = pos.size.toFixed(6).padStart(13);
-      const entryStr = pos.entryPrice.toFixed(2).padStart(12);
+      const entryStr = formatPrice(pos.entryPrice).padStart(12);
       const valueStr = pos.positionValue.toFixed(2).padStart(15);
       const pnlStr = pos.unrealizedPnl.toFixed(2).padStart(12);
       const roeStr = pos.returnOnEquity.toFixed(2).padStart(6);

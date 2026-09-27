@@ -19,7 +19,8 @@
  *    margin is lost. Checked on 15m candle highs/lows (trade prices; the exchange uses mark: slightly conservative).
  *  - Funding: every hour boundary crossed while a position is open is recorded with the position held AT that hour
  *    (all ledger changes go through mutate()). Payment = -szi x px x rate, rate = realized fundingHistory rate,
- *    px = close of the 1h candle ending at that hour (oracle-price proxy). Assumption: credited to isolated margin.
+ *    px = close of the 1h candle ending at that hour (oracle-price proxy). Credited to the isolated margin, not
+ *    withdrawable (verified live 2026-09-27: PUMP rawUsd +0.001858 = the userFunding row, withdrawable unchanged).
  *  - Outages / PC off: the exchange keeps paying funding and can liquidate. On restart the missed hours are replayed
  *    from public history (funding exactly once: marker and credits are written in the same atomic ledger write), and
  *    liquidation is scanned first, before any bot order is simulated or account state is served.
@@ -28,11 +29,10 @@
  *    after paper.transferDelayMinutes, then debit and credit happen atomically. Until then both
  *    balances stay unchanged and the bot stays on hold. Older, already-debited transfers still settle once.
  *
- * Known limitations: own orders do not move the book; oracle price proxied by candles; funding destination (isolated
- * margin vs withdrawable) and whether spot buys are checked at the limit price are unverified (the latter is logged
- * as `would_reject_strict` instead of rejecting); whether the $10 minimum uses mid or limit price is unverified (mid,
- * the bot's own rule); funding still pending when an outage liquidation is replayed goes to free USDC, not the lost
- * margin (a few hours of funding, slightly optimistic).
+ * Known limitations: own orders do not move the book; oracle price proxied by candles; whether spot buys are checked
+ * at the limit price is unverified (logged as `would_reject_strict` instead of rejecting); whether the $10 minimum uses
+ * mid or limit price is unverified (mid, the bot's own rule); funding still pending when an outage liquidation is
+ * replayed goes to free USDC, not the lost margin (a few hours of funding, slightly optimistic).
  *
  * Files (next to the bot state, ./data-paper by default): paper-ledger.json (account, atomic writes; a corrupt file
  * throws, it is never reset) and events.jsonl (append-only log read by paper_stats.py).
@@ -290,7 +290,7 @@ export class PaperConnector extends HyperliquidConnector {
             return false;
           }
           const usdc = -f.szi * px * rate;
-          if (L.positions[coin]) L.positions[coin].margin += usdc;  // assumption: isolated funding lands in margin
+          if (L.positions[coin]) L.positions[coin].margin += usdc;  // isolated funding lands in margin (verified live)
           else L.perpUSDC += usdc;                                  // position closed since that hour
           L.funding.push({ time: f.hour * HOUR, coin, usdc, szi: f.szi, fundingRate: rate });
           out.push({ type: 'funding', coin, hour: f.hour, rate, px, szi: f.szi, usdc });

@@ -1,5 +1,5 @@
 import HyperliquidConnector from './hyperliquid.js';
-import { getPerpPositions, getSpotBalances, MIN_NOTIONAL_USD } from './utils/positions.js';
+import { getPerpPositions, getSpotBalances, MIN_NOTIONAL_USD, formatPrice } from './utils/positions.js';
 import { assertCompleteFill } from './utils/order-fill.js';
 import fs from 'fs';
 
@@ -83,7 +83,7 @@ async function closePosition(hyperliquid, position, type, priceMap) {
     if (outcome.isCompleteFill) {
       const fillPx = outcome.fillPrice;
       const fillSz = outcome.fillSize;
-      console.log(`[${type}] ✅ ${symbol} closed: ${fillSz} @ $${fillPx.toFixed(2)}`);
+      console.log(`[${type}] ✅ ${symbol} closed: ${fillSz} @ $${formatPrice(fillPx)}`);
       return { success: true, symbol, type, size: fillSz, price: fillPx };
     } else {
       console.error(`[${type}] ❌ ${symbol} failed: ${error || 'Unknown error'}`);
@@ -185,7 +185,7 @@ async function main() {
     console.log();
     console.log('Closed positions:');
     for (const result of successful) {
-      console.log(`  ✅ ${result.type} ${result.symbol}: ${result.size} @ $${result.price.toFixed(2)}`);
+      console.log(`  ✅ ${result.type} ${result.symbol}: ${result.size} @ $${formatPrice(result.price)}`);
     }
   }
 

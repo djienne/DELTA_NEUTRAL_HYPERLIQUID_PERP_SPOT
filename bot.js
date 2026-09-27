@@ -11,6 +11,7 @@ import { getPerpSpotSpreads } from './utils/arbitrage.js';
 import { getManagedPerpSymbols, getManagedSpotSymbols, getMaxHedgeMismatchPercent, getStartupCleanupMode } from './utils/risk.js';
 import { getCurrentPositionFundingSignal, switchEdge } from './utils/position-decision.js';
 import { PaperConnector } from './utils/paper-exchange.js';
+import { formatPrice } from './utils/positions.js';
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -567,8 +568,8 @@ async function openPosition(opportunity, reason) {
     console.log(balanceReport.report);
     const result = await openDeltaNeutralPosition(hyperliquid, opportunity, balanceReport.balances, config, { verbose: true });
     if (result.success) {
-      console.log(`${timestamp()} [5/6] ✅ Opened ${result.symbol}: SHORT ${result.perpSize} PERP @ $${formatKnown(result.perpEntryPrice)}, ` +
-        `LONG ${result.spotSize} SPOT @ $${formatKnown(result.spotEntryPrice)}, value $${formatKnown(result.positionValue)}, ` +
+      console.log(`${timestamp()} [5/6] ✅ Opened ${result.symbol}: SHORT ${result.perpSize} PERP @ $${formatPrice(result.perpEntryPrice)}, ` +
+        `LONG ${result.spotSize} SPOT @ $${formatPrice(result.spotEntryPrice)}, value $${formatKnown(result.positionValue)}, ` +
         `7d funding ${(result.annualizedFunding * 100).toFixed(2)}% APY`);
       state = recordPosition(state, result);
       saveState(state);
@@ -668,8 +669,8 @@ async function displayStatus() {
     const spotValue = Number.isFinite(position.spotEntryPrice) ? position.spotSize * position.spotEntryPrice : NaN;
     const totalValue = perpValue + spotValue;
 
-    console.log(`  PERP:  SHORT ${position.perpSize} @ $${formatKnown(position.perpEntryPrice, 4)} ${colors.dim}($${formatKnown(perpValue)})${colors.reset}`);
-    console.log(`  SPOT:  LONG ${position.spotSize} @ $${formatKnown(position.spotEntryPrice, 4)} ${colors.dim}($${formatKnown(spotValue)})${colors.reset}`);
+    console.log(`  PERP:  SHORT ${position.perpSize} @ $${formatPrice(position.perpEntryPrice)} ${colors.dim}($${formatKnown(perpValue)})${colors.reset}`);
+    console.log(`  SPOT:  LONG ${position.spotSize} @ $${formatPrice(position.spotEntryPrice)} ${colors.dim}($${formatKnown(spotValue)})${colors.reset}`);
     console.log(`  ${colors.bright}Total Entry Value: $${formatKnown(totalValue)}${colors.reset}`);
     console.log();
 
