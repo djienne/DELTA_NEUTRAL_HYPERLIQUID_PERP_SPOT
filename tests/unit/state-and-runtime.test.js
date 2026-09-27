@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import HyperliquidConnector from '../../hyperliquid.js';
 import { getLeverageSettings } from '../../utils/leverage.js';
-import { clearPendingIntent, getHistoryStats, loadState, recordPosition, closePosition, saveState, setPendingIntent } from '../../utils/state.js';
+import { canClosePosition, clearPendingIntent, getHistoryStats, loadState, recordPosition, closePosition, saveState, setPendingIntent } from '../../utils/state.js';
 import { timestamp } from '../../bot.js';
 
 test('bot timestamp is available at module scope', () => {
@@ -23,7 +23,9 @@ test('getBidAsk includes mid price', () => {
     time: 123
   });
 
-  assert.deepEqual(connector.getBidAsk('BTC'), {
+  const { receivedAt, ...book } = connector.getBidAsk('BTC');
+  assert.ok(Math.abs(receivedAt - Date.now()) < 1000);
+  assert.deepEqual(book, {
     coin: 'BTC',
     bid: 99,
     ask: 101,
@@ -150,4 +152,12 @@ test('corrupt state file is quarantined instead of silently reused', () => {
     }
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test('adopted position with unknown opening time: the minimum hold counts from adoption, then it can switch', () => {
+  const day = 24 * 3600000;
+  assert.equal(canClosePosition({ openTime: null, adoptedAt: Date.now() - 8 * day }, 7 * day), true);
+  assert.equal(canClosePosition({ openTime: null, adoptedAt: Date.now() - day }, 7 * day), false);
+  assert.equal(canClosePosition({ openTime: Date.now() - 8 * day, adoptedAt: Date.now() }, 7 * day), true);  // known time wins
+  assert.equal(canClosePosition({ openTime: null }, 7 * day), false);
 });

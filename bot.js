@@ -223,6 +223,7 @@ function adoptOnChainPair(pair, botState, reason, persist = saveState) {
     spotEntryPrice: null, positionValue: pair.perpPosition.positionValue,
     fundingRate: null, annualizedFunding: null, openFeesActual: 0, openFeesEstimated: 0,
     openTime: botState.pendingIntent?.type === 'opening' ? botState.pendingIntent.createdAt : null,
+    adoptedAt: Date.now(),  // starts the minimum-hold clock when the real opening time is unknown
     accountingComplete: false
   };
   const next = recordPosition(botState, position);
@@ -641,6 +642,11 @@ async function displayStatus() {
     }
   }
 
+  // Unresolved recovery (e.g. a close that failed on a transient error): retry every status tick, not only hourly
+  if (state?.pendingIntent && !isRunning) {
+    await runGuardedCycle();
+  }
+
   if (hasPosition(state)) {
     const position = getCurrentPosition(state);
 
@@ -912,7 +918,13 @@ async function runGuardedCycle() {
 async function run() {
   await initialize();
 
-  state = await reconcilePendingIntent(hyperliquid, state);
+  // A failed recovery (e.g. a close hitting a 429) must not exit into a Docker restart loop that resends orders on every
+  // start: keep running; runCycle retries it first, and displayStatus every 2 minutes while it is pending.
+  try {
+    state = await reconcilePendingIntent(hyperliquid, state);
+  } catch (error) {
+    console.error(`${timestamp()} [Bot] Startup recovery failed, will retry: ${error.message}`);
+  }
 
   // Clean up any imbalanced positions from failed trades
   if (!state.pendingIntent) await cleanupImbalancedPositions();

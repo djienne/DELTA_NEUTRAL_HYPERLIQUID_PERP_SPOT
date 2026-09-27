@@ -427,7 +427,8 @@ class HyperliquidConnector extends EventEmitter {
       bestAsk,
       bids,
       asks,
-      timestamp: time || Date.now()
+      timestamp: time || Date.now(),  // exchange time
+      receivedAt: Date.now()          // local time
     };
 
     this.orderbooks.set(coin, orderbook);
@@ -454,7 +455,8 @@ class HyperliquidConnector extends EventEmitter {
       mid,
       bidSize: orderbook.bestBid?.size || null,
       askSize: orderbook.bestAsk?.size || null,
-      timestamp: orderbook.timestamp
+      timestamp: orderbook.timestamp,
+      receivedAt: orderbook.receivedAt
     };
   }
 
@@ -695,7 +697,7 @@ class HyperliquidConnector extends EventEmitter {
           continue;
         }
 
-        const age = now - orderbook.timestamp;
+        const age = now - orderbook.receivedAt;
 
         if (age > this.stalenessThreshold) {
           console.warn(`[Hyperliquid] Orderbook for ${coin} is stale (${Math.round(age / 1000)}s old)`);
@@ -1361,9 +1363,12 @@ class HyperliquidConnector extends EventEmitter {
   }
 
   async getFreshBidAsk(coin, { force = false, maxAgeMs = this.maxOrderbookAgeMs } = {}) {
+    // Fresh = received within maxAgeMs AND exchange time not older than maxAgeMs. An exchange time AHEAD of the local
+    // clock is fine (Docker/WSL2 clocks lag after sleep). An old exchange time means stale data (e.g. a halted chain)
+    // or a host clock running ahead: indistinguishable without an outside clock, so both block orders.
     const valid = book => book && Number.isFinite(book.bid) && Number.isFinite(book.ask) &&
-      book.bid > 0 && book.ask >= book.bid && Number.isFinite(book.timestamp) &&
-      Date.now() - book.timestamp >= -1000 && Date.now() - book.timestamp <= maxAgeMs;
+      book.bid > 0 && book.ask >= book.bid && Number.isFinite(book.receivedAt) && Number.isFinite(book.timestamp) &&
+      Date.now() - book.receivedAt <= maxAgeMs && Date.now() - book.timestamp <= maxAgeMs;
     let book = this.getBidAsk(coin);
     if (force || !valid(book)) book = await this.refreshOrderbookSnapshot(coin);
     if (!valid(book)) throw new Error(`No fresh valid orderbook for ${coin}`);

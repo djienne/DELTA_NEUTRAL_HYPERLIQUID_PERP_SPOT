@@ -357,6 +357,7 @@ test('createMarketOrder refreshes stale orderbook before pricing', async () => {
     ],
     time: Date.now() - 10000
   });
+  connector.orderbooks.get('BTC').receivedAt -= 10000;  // nothing received for 10 s
   connector.requestL2BookRest = async () => {
     refreshed = true;
     return {
@@ -422,4 +423,23 @@ test('after an outage the reconnected socket is not killed by the pong clock of 
   await new Promise(resolve => setTimeout(resolve, 60));
   c.stopHealthMonitoring();
   assert.equal(terminated, false);
+});
+
+test('book freshness: a host clock lagging the exchange (Docker/WSL2 after sleep) does not block orders; old data does', async () => {
+  const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
+  const levels = [[{ px: '99', sz: '1', n: 1 }], [{ px: '101', sz: '1', n: 1 }]];
+  let exchangeSkew = 60000;  // exchange clock a minute ahead of the host
+  let refreshes = 0;
+  connector.requestL2BookRest = async () => { refreshes++; return { levels, time: Date.now() + exchangeSkew }; };
+
+  connector.updateOrderbook({ coin: 'BTC', levels, time: Date.now() + exchangeSkew });
+  assert.equal((await connector.getFreshBidAsk('BTC')).mid, 100);
+  assert.equal(refreshes, 0);
+  connector.orderbooks.get('BTC').receivedAt -= 60000;  // nothing received for a minute: stale, refreshed
+  assert.equal((await connector.getFreshBidAsk('BTC')).mid, 100);
+  assert.equal(refreshes, 1);
+
+  exchangeSkew = -60000;  // exchange data a minute old (halted chain, or host clock ahead): no order
+  connector.orderbooks.clear();
+  await assert.rejects(connector.getFreshBidAsk('BTC'), /fresh valid/);
 });

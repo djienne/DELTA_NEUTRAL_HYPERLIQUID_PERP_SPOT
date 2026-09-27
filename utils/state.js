@@ -291,11 +291,13 @@ export function getPositionAge(position) {
  * @returns {boolean} True if can close
  */
 export function canClosePosition(position, minHoldTimeMs) {
-  if (!position || !Number.isFinite(position.openTime)) {
+  // Unknown opening time (adopted position): hold from adoption, so it can still be switched later
+  const since = Number.isFinite(position?.openTime) ? position.openTime : position?.adoptedAt;
+  if (!Number.isFinite(since)) {
     return false;
   }
 
-  return getPositionAge(position) >= minHoldTimeMs;
+  return Date.now() - since >= minHoldTimeMs;
 }
 
 /**

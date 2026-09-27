@@ -256,11 +256,12 @@ See [CLAUDE.md](CLAUDE.md) for the decision flow, order-execution rules, Hyperli
 
 ## Recovery and accounting guarantees
 
-- Pending closes finish reducing the remaining legs; they never recreate a leg that already closed. Recovery runs before each decision cycle and at startup. Unresolved intents block new positions.
+- Pending closes finish reducing the remaining legs; they never recreate a leg that already closed. Recovery runs at startup, before each decision cycle and every 2 minutes while an intent is pending; a failed recovery is logged and retried, it does not crash the bot into a restart loop. Unresolved intents block new positions.
 - Verification examines the entire managed account. Multiple pairs or a symbol inconsistent with state require manual resolution. Every recovery order that adds perpetual exposure must first receive confirmation of 1x isolated leverage.
 - Entry and live hedge checks use the same size-mismatch definition: absolute size difference divided by the larger leg. The default limit is 2%. Lot-rounded differences below the $10 order minimum remain visible as dust and are not repeatedly ordered.
 - Entry and exit funding decisions require 168 distinct consecutive hourly observations in the requested seven-day window. Missing history never falls back to the current hour. Recovery closes do not depend on funding history.
-- All orders use validated books no older than ten seconds. Entries refresh both books and recheck spreads, basis, sizes and hedge mismatch. Exit and cleanup orders use fresh prices without entry filters.
+- All orders use validated books no older than ten seconds, both since they were received and by exchange time. An exchange clock ahead of the host (Docker/WSL2 clocks lag after sleep) is fine; exchange data older than ten seconds (a halted chain, or a host clock running ahead) blocks orders. Entries refresh both books and recheck spreads, basis, sizes and hedge mismatch. Exit and cleanup orders use fresh prices without entry filters.
+- A position adopted from the chain without a known opening time keeps `openTime: null` for accounting, but its minimum hold counts from `adoptedAt`, so it can still be switched.
 - Close accounting includes all fills and retries. Known fees and estimates for missing fees are kept separately. Remaining dust is inventory, not a realized sale. History records `accountingComplete`, nullable `totalPnl`, `closeFills` and `residualInventory`; unavailable PnL is counted separately, not as zero. Existing history is not rewritten. Crash recovery preserves known entry information and labels missing historical costs unknown.
 - Paper equity snapshots include `pendingOperatorTransfer` for time waiting for the operator. Cash-flow statistics remain distinct from the bot's history totals.
 

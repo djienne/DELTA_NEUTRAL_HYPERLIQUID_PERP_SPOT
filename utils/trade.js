@@ -162,7 +162,9 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
     console.log(`[Trade]   SPOT: ${spotSizeRounded} (szDecimals: ${spotAssetInfo.szDecimals})`);
   }
 
-  if (getSizeMismatchPercent(perpSizeRounded, spotSizeRounded) > getMaxOpenHedgeMismatchPercent(config) + 1e-9) {
+  // Spot buys pay the fee in the token: on-chain spot (what the live hedge check sees) is net of it
+  const spotNet = size => size * (1 - getTakerFees(config).spot);
+  if (getSizeMismatchPercent(perpSizeRounded, spotNet(spotSizeRounded)) > getMaxOpenHedgeMismatchPercent(config) + 1e-9) {
     throw new Error('Rounded entry sizes exceed hedge mismatch limit');
   }
   if (perpSizeRounded * perpMid < minNotional || spotSizeRounded * spotMid < minNotional) {
@@ -268,7 +270,7 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
     const perpFillSz = parseFloat(perpFilled.totalSz || perpSizeRounded);
     const spotFillSz = parseFloat(spotFilled.totalSz || spotSizeRounded);
     const maxOpenHedgeMismatchPercent = getMaxOpenHedgeMismatchPercent(config);
-    const hedgeMismatchPct = getSizeMismatchPercent(perpFillSz, spotFillSz);
+    const hedgeMismatchPct = getSizeMismatchPercent(perpFillSz, spotNet(spotFillSz));
 
     if (hedgeMismatchPct > maxOpenHedgeMismatchPercent + 1e-9) {
       console.error('[Trade] ❌ Partial fill imbalance detected, closing filled legs...');

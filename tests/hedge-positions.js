@@ -66,8 +66,8 @@ async function main() {
 
     console.log(`Found ${analysis.hedgeNeeds.length} position(s) needing hedges:`);
     for (const need of analysis.hedgeNeeds) {
-      const symbol = need.perpSymbol || need.spotSymbol;
-      const size = (need.perpSizeNeeded || need.spotSizeNeeded).toFixed(6);
+      const symbol = need.targetSymbol ?? need.fallbackCloseSymbol;
+      const size = (need.targetSize ?? need.fallbackCloseSize).toFixed(6);  // close-only needs have no target
       console.log(`  • ${need.action} ${size} ${symbol} ${need.market} ($${need.valueUSD.toFixed(2)})`);
     }
     console.log();
