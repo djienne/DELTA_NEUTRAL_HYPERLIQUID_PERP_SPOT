@@ -78,6 +78,21 @@ test('real open + close run through the paper exchange: flat afterwards, USDC = 
   assert.ok(!market.requests.some(r => r.url.includes('/exchange')), 'nothing may reach the real exchange');
 });
 
+test('spot buy is grossed up for its token fee and nets out held dust: net spot = perp short within half a lot', async () => {
+  for (const dust of [0, 0.00321]) {
+    const { paper } = makePaper();
+    if (dust) paper.ledger.spotTokens.UBTC = dust;  // left by an earlier close (sells round down to the lot)
+    const opportunity = { symbol: 'BTC', bidAsk: { perpMid: 100, spotMid: 100 }, funding: { fundingRate: 0.0000125 }, avgFundingRate: 0.11 };
+    const open = await openDeltaNeutralPosition(paper, opportunity, { perpBalance: 500, spotBalance: 500 }, config);
+    assert.equal(open.success, true, open.error);
+    const perp = -paper.ledger.positions.BTC.szi, spot = paper.ledger.spotTokens.UBTC;
+    assert.ok(Math.abs(spot - perp) <= 0.5e-5 + 1e-12, `dust ${dust}: spot ${spot} vs perp ${perp}`);  // UBTC lot 1e-5
+    assert.ok(Math.abs(open.spotSize - spot) < 1e-9, 'state records the net token balance');
+    const close = await closeDeltaNeutralPosition(paper, { ...open, perpSymbol: 'BTC', spotSymbol: 'UBTC', openTime: Date.now() }, config);
+    assert.equal(close.accountingComplete, true);
+  }
+});
+
 test('walkBook fills level by level up to the limit; exchange order checks; responses carry no fee field (like live)', async () => {
   const asks = [{ px: '100', sz: '1' }, { px: '101', sz: '1' }, { px: '103', sz: '5' }];
   const partial = walkBook([[], asks], true, 102, 3);

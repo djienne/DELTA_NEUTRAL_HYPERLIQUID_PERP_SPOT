@@ -137,8 +137,9 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
     };
   }
 
-  // Calculate position sizes based on available capital
-  const size = Math.min(availableNotional / perpMid, availableNotional / spotMid);
+  // Calculate position sizes based on available capital (the spot buy is grossed up by its fee, see below)
+  const spotFee = getTakerFees(config).spot;
+  const size = Math.min(availableNotional / perpMid, availableNotional * (1 - spotFee) / spotMid);
   const notionalValue = size * perpMid;
 
   if (verbose) {
@@ -152,23 +153,28 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
   const perpAssetInfo = hyperliquid.getAssetInfo(perpSymbol, perpAssetId);
   const spotAssetInfo = hyperliquid.getAssetInfo(spotSymbol, spotAssetId);
 
-  // Round sizes to proper lot sizes
+  // Spot buys pay the fee in the token, and every close leaves sub-lot dust of it (sells round down). Buy so the NET
+  // spot balance equals the perp short: (perp - dust) / (1 - fee), to the nearest spot lot. Residual <= half a lot.
+  // Perp dust is not netted: perp closes are whole lots, so it does not arise systematically.
+  const heldSpot = (await getOpenExposure(hyperliquid, perpSymbol, spotSymbol)).spot?.size ?? 0;
+  const spotNet = size => heldSpot + size * (1 - spotFee);
   const perpSizeRounded = parseFloat(hyperliquid.roundSize(size, perpAssetInfo.szDecimals, 'down'));
-  const spotSizeRounded = parseFloat(hyperliquid.roundSize(size, spotAssetInfo.szDecimals, 'down'));
+  const spotSizeRounded = perpSizeRounded > heldSpot
+    ? parseFloat(hyperliquid.roundSize((perpSizeRounded - heldSpot) / (1 - spotFee), spotAssetInfo.szDecimals, 'nearest'))
+    : 0;
 
   if (verbose) {
     console.log(`[Trade] Rounded sizes:`);
     console.log(`[Trade]   PERP: ${perpSizeRounded} (szDecimals: ${perpAssetInfo.szDecimals})`);
-    console.log(`[Trade]   SPOT: ${spotSizeRounded} (szDecimals: ${spotAssetInfo.szDecimals})`);
+    console.log(`[Trade]   SPOT: ${spotSizeRounded} (szDecimals: ${spotAssetInfo.szDecimals}; held ${heldSpot}, ` +
+      `net after ${+(spotFee * 100).toPrecision(6)}% fee ≈ ${Number(spotNet(spotSizeRounded).toPrecision(12))})`);
   }
 
-  // Spot buys pay the fee in the token: on-chain spot (what the live hedge check sees) is net of it
-  const spotNet = size => size * (1 - getTakerFees(config).spot);
-  if (getSizeMismatchPercent(perpSizeRounded, spotNet(spotSizeRounded)) > getMaxOpenHedgeMismatchPercent(config) + 1e-9) {
-    throw new Error('Rounded entry sizes exceed hedge mismatch limit');
-  }
   if (perpSizeRounded * perpMid < minNotional || spotSizeRounded * spotMid < minNotional) {
     return { success: false, error: 'Rounded entry size is below the configured minimum', symbol };
+  }
+  if (getSizeMismatchPercent(perpSizeRounded, spotNet(spotSizeRounded)) > getMaxOpenHedgeMismatchPercent(config) + 1e-9) {
+    throw new Error('Rounded entry sizes exceed hedge mismatch limit');
   }
   // Execute orders in parallel for speed
   if (verbose) {
@@ -297,7 +303,7 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
       perpSymbol: perpSymbol,
       spotSymbol: spotSymbol,
       perpSize: perpFillSz,
-      spotSize: spotFillSz,
+      spotSize: Number(spotNet(spotFillSz).toPrecision(12)),  // net token balance (fee in token, dust included)
       perpEntryPrice: Number.isFinite(perpFillPx) && perpFillPx > 0 ? perpFillPx : null,
       spotEntryPrice: Number.isFinite(spotFillPx) && spotFillPx > 0 ? spotFillPx : null,
       positionValue: perpFillSz * perpFillPx,
@@ -383,9 +389,9 @@ export async function closeDeltaNeutralPosition(hyperliquid, position, config, o
   const residualInventory = { perp: exposure.perp?.size ?? 0, spot: exposure.spot?.size ?? 0 };
   for (const leg of ['perp', 'spot']) {
     const recorded = position[`${leg}Size`];
-    // Spot buy fees reduce token inventory; larger differences imply unrecorded position changes.
-    const expected = leg === 'spot' ? recorded * (1 - fees.spot) : recorded;
-    if (!Number.isFinite(recorded) || Math.abs(fills[leg].size + residualInventory[leg] - expected) >
+    // spotSize is the net token balance (states before net recording held the gross buy: one spot fee more).
+    // Larger differences imply unrecorded position changes.
+    if (!Number.isFinite(recorded) || Math.abs(fills[leg].size + residualInventory[leg] - recorded) >
         Math.max(1e-9, recorded * (leg === 'spot' ? fees.spot + 1e-9 : 1e-9))) accountingComplete = false;
   }
   const perpClosePrice = fills.perp.size ? fills.perp.notional / fills.perp.size : null;

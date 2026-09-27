@@ -106,6 +106,8 @@ cost = 2 × (perp fee + spot fee) + candidate perp + spot spread      (close-onl
 - PERP and SPOT legs go out together (`Promise.all`). If one leg fails, the filled leg is closed from on-chain state.
 - Closes are sized from **on-chain** exposure, not the state file (spot fees are taken in the received token). A close
   counts as done only when the chain shows the managed symbols flat.
+- Spot buys are sized so the **net** token balance equals the perp short: (perp − held spot dust) / (1 − spot fee), to the
+  nearest spot lot (residual ≤ half a lot; hedge repairs gross up the same way). The state's `spotSize` is that net balance.
 - `reduceOnly` is valid for PERP only. It is rejected on SPOT.
 - Minimum order notional is $10, checked on `mid × size`.
 - Slippage is a **percent** (`5` = 5%). `hyperliquid.normalizeSlippagePercent` divides by 100.

@@ -1,7 +1,7 @@
 import HyperliquidConnector from '../hyperliquid.js';
 import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral, executableSize } from './positions.js';
 import { assertCompleteFill } from './order-fill.js';
-import { getMinFillRatio, getMaxHedgeMismatchPercent } from './risk.js';
+import { getMinFillRatio, getMaxHedgeMismatchPercent, getTakerFees } from './risk.js';
 import { setLeverageTo1x } from './leverage.js';
 
 // Inspect the whole managed account. Keep subminimum inventory visible, but never submit it alone.
@@ -86,7 +86,9 @@ export async function createHedge(hyperliquid, need, config, { verbose = false }
     if (!isSpot) await setLeverageTo1x(hyperliquid, need.targetSymbol, false);
     const id = await hyperliquid.getAssetId(need.targetSymbol, isSpot);
     const book = await hyperliquid.getFreshBidAsk(hyperliquid.getCoinForOrderbook(need.targetSymbol, id));
-    const size = await executableSize(hyperliquid, need.targetSymbol, isSpot, need.targetSize, book.mid);
+    // A spot buy pays its fee in the token: gross the gap up so the net received closes it
+    const wanted = isSpot && need.targetSide === 'buy' ? need.targetSize / (1 - getTakerFees(config).spot) : need.targetSize;
+    const size = await executableSize(hyperliquid, need.targetSymbol, isSpot, wanted, book.mid);
     if (!size) return { success: false, dust: true, error: 'Hedge difference below executable minimum', hedgeNeed: need };
     const result = await hyperliquid.createMarketOrder(need.targetSymbol, need.targetSide, size, {
       isSpot, reduceOnly: false, slippage: config.trading?.maxSlippagePercent ?? 5, sizeRoundingMode: 'down'

@@ -127,6 +127,7 @@ function makeHyperliquid(handler, options = {}) {
     exchangeUrl: 'https://example.invalid/exchange',
     fetchJsonWithTimeout: async () => ({ status: 'ok' }),
     calls,
+    chain,
     async signAction() {
       return { r: '0x1', s: '0x2', v: 27 };
     },
@@ -282,19 +283,19 @@ test('rejected PERP open request reconciles and closes filled SPOT leg', async (
 });
 
 test('both rejected open requests use on-chain reconciliation for cleanup', async () => {
+  // Both requests time out, yet both orders landed on-chain
   const hyperliquid = makeHyperliquid(({ symbol, side, index }) => {
-    if (index === 0 && symbol === 'BTC' && side === 'sell') throw new Error('perp timeout');
-    if (index === 1 && symbol === 'UBTC' && side === 'buy') throw new Error('spot timeout');
+    if (index === 0 && symbol === 'BTC' && side === 'sell') {
+      hyperliquid.chain.perpPositions.push({ position: { coin: 'BTC', szi: '-1', entryPx: '100', positionValue: '100' } });
+      throw new Error('perp timeout');
+    }
+    if (index === 1 && symbol === 'UBTC' && side === 'buy') {
+      hyperliquid.chain.spotBalances.push({ coin: 'UBTC', total: '1', hold: '0' });
+      throw new Error('spot timeout');
+    }
     if (symbol === 'UBTC' && side === 'sell') return filled('1');
     if (symbol === 'BTC' && side === 'buy') return filled('1');
     throw new Error(`Unexpected order ${symbol} ${side}`);
-  }, {
-    perpPositions: [
-      { position: { coin: 'BTC', szi: '-1', entryPx: '100', positionValue: '100' } }
-    ],
-    spotBalances: [
-      { coin: 'UBTC', total: '1', hold: '0' }
-    ]
   });
 
   await assert.rejects(
