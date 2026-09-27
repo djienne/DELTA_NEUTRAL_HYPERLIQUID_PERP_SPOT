@@ -7,12 +7,11 @@ export function getCurrentPositionFundingSignal(position, analysis) {
     return { available: false, reason: 'missing position or analysis' };
   }
 
-  const ranked = analysis.rankedOpportunities?.find(o => o.symbol === position.symbol);
   const raw = analysis.marketData?.fundingRates?.find(f => f.symbol === position.symbol);
-  const fundingRate = ranked ? ranked.avgFundingRate : (raw?.history?.avg?.annualized ?? raw?.annualizedRate);
+  const fundingRate = raw?.history?.avg?.annualized;
 
-  if (!Number.isFinite(fundingRate)) {
-    return { available: false, symbol: position.symbol, reason: raw?.error || `No finite 7d funding for ${position.symbol}` };
+  if (raw?.error || raw?.historyError || raw?.history?.count !== 168 || !Number.isFinite(fundingRate)) {
+    return { available: false, symbol: position.symbol, reason: raw?.error || raw?.historyError || `No complete 7d funding for ${position.symbol}` };
   }
 
   return { available: true, symbol: position.symbol, fundingRate, fundingPercent: fundingRate * 100 };

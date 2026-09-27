@@ -141,13 +141,11 @@ export function getSizeMismatchPercent(sizeA, sizeB) {
   return (Math.abs(sizeA - sizeB) / denominator) * 100;
 }
 
-function getKnownFee(result) {
+export function getKnownFee(result) {
   const filled = getFilledStatus(result);
   const candidates = [
     filled?.fee,
-    filled?.feeUsd,
-    filled?.builderFee,
-    filled?.builderFeeUsd
+    filled?.feeUsd
   ];
 
   for (const value of candidates) {
@@ -157,9 +155,9 @@ function getKnownFee(result) {
     }
   }
 
-  return 0;
+  return null;
 }
 
 export function getOrderFees(...results) {
-  return results.reduce((sum, result) => sum + getKnownFee(result), 0);
+  return results.reduce((sum, result) => sum + (getKnownFee(result) ?? 0), 0);
 }

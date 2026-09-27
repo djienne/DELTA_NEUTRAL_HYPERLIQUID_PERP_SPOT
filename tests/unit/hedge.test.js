@@ -18,11 +18,14 @@ function makeHedgeHyperliquid(options = {}) {
       return { universe: [{ name: 'BTC' }, { name: 'ETH' }] };
     },
     async getAllMids() {
-      return { BTC: '100', ETH: '100' };
+      return { BTC: '100', ETH: '100', '@1': '100' };
     },
-    async getAssetId() {
-      return 1;
-    },
+    async getAssetId(symbol, isSpot) { return isSpot ? 10001 : 1; },
+    getCoinForOrderbook(symbol, id) { return id >= 10000 ? '@1' : symbol; },
+    async getFreshBidAsk() { return { bid: 99.99, ask: 100.01, mid: 100, timestamp: Date.now() }; },
+    signer: {}, exchangeUrl: 'https://example.invalid',
+    async signAction() { return {}; },
+    async fetchJsonWithTimeout() { return { status: 'ok' }; },
     getAssetInfo() {
       return { szDecimals: 4 };
     },

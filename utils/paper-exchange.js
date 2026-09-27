@@ -24,9 +24,9 @@
  *    from public history (funding exactly once: marker and credits are written in the same atomic ledger write), and
  *    liquidation is scanned first, before any bot order is simulated or account state is served.
  *  - Manual PERP<->SPOT transfer (the live API key cannot transfer): a simulated human reads the bot's request in
- *    rebalance-status.json, the file a live user reads, and makes exactly that transfer, one at a time. Funds leave at
- *    once and land after paper.transferDelayMinutes; in transit they are in neither account (bot on hold) but count in
- *    equity.
+ *    rebalance-status.json, the file a live user reads, and makes that transfer, one at a time. The operator acts
+ *    after paper.transferDelayMinutes, then debit and credit happen atomically. Until then both
+ *    balances stay unchanged and the bot stays on hold. Older, already-debited transfers still settle once.
  *
  * Known limitations: own orders do not move the book; oracle price proxied by candles; funding destination (isolated
  * margin vs withdrawable) and whether spot buys are checked at the limit price are unverified (the latter is logged
@@ -125,7 +125,7 @@ export function newLedger(config, now = Date.now()) {
     spotTokens: {},                                   // token name -> amount
     positions: {},                                    // perp coin -> {szi, entryPx, margin, leverage}
     leverage: {},                                     // perp coin -> {type, value}
-    transfers: [],                                    // {amount, to: 'perp'|'spot', startedAt, eta}
+    transfers: [],                                    // {amount, to, startedAt, eta, debited:false}; absent flag = legacy in transit
     lastBoundaryHour: Math.floor(now / HOUR),
     pendingFunding: [],                               // {hour, coin, szi} awaiting the published rate
     funding: [],                                      // paid rows, served as userFunding (last 90 days kept)
@@ -308,6 +308,11 @@ export class PaperConnector extends HyperliquidConnector {
     const landed = L.transfers.filter(t => t.eta <= now);
     L.transfers = L.transfers.filter(t => t.eta > now);
     for (const t of landed) {
+      if (t.debited === false) {
+        const source = t.to === 'perp' ? 'spotUSDC' : 'perpUSDC';
+        t.amount = Math.max(0, Math.min(t.amount, L[source]));
+        L[source] -= t.amount;
+      }
       if (t.to === 'perp') L.perpUSDC += t.amount; else L.spotUSDC += t.amount;
       L.lastTransferLanded = now;
     }
@@ -330,9 +335,8 @@ export class PaperConnector extends HyperliquidConnector {
     const to = ask.direction === 'PERP_TO_SPOT' ? 'spot' : 'perp';
     const amount = truncate(Math.min(ask.amountUSDC, to === 'spot' ? L.perpUSDC : L.spotUSDC), USDC_DECIMALS);
     if (!(amount > 0)) return [];
-    if (to === 'perp') L.spotUSDC -= amount; else L.perpUSDC -= amount;
-    L.transfers.push({ amount, to, startedAt: now, eta: now + this.transferDelayMs });
-    console.log(`[Paper] 🔁 Simulated manual transfer: ${amount.toFixed(2)} USDC to ${to.toUpperCase()}, lands in ${this.transferDelayMs / MINUTE} min`);
+    L.transfers.push({ amount, to, startedAt: now, eta: now + this.transferDelayMs, debited: false });
+    console.log(`[Paper] Simulated operator will transfer ${amount.toFixed(2)} USDC to ${to.toUpperCase()} in ${this.transferDelayMs / MINUTE} min`);
     return [{ type: 'transfer_start', amount, to, eta: now + this.transferDelayMs }];
   }
 
@@ -352,8 +356,10 @@ export class PaperConnector extends HyperliquidConnector {
       spot += amt * mid;
       tokens[token] = { amount: amt, mid };
     }
-    const transit = L.transfers.reduce((s, t) => s + t.amount, 0);
-    return { equity: perp + spot + transit, perp, spot, transit, perpUSDC: L.perpUSDC, spotUSDC: L.spotUSDC, positions, tokens };
+    const transit = L.transfers.filter(t => t.debited !== false).reduce((s, t) => s + t.amount, 0);
+    return { equity: perp + spot + transit, perp, spot, transit,
+      pendingOperatorTransfer: L.transfers.some(t => t.debited === false),
+      perpUSDC: L.perpUSDC, spotUSDC: L.spotUSDC, positions, tokens };
   }
 
   // ---------------------------------------------------------------- simulated exchange endpoints

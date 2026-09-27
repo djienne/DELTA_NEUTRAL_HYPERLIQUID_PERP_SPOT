@@ -70,7 +70,6 @@ async function closePosition(hyperliquid, position, type, priceMap) {
       isSpot: isSpot,
       reduceOnly: isSpot ? false : true, // reduceOnly only works for PERP
       slippage: config.trading.maxSlippagePercent,
-      overrideMidPrice: price,
       sizeRoundingMode: 'down'
     });
 

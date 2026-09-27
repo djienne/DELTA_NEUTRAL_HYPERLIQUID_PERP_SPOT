@@ -6,7 +6,7 @@
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
     "dotenv": "^17.2.3",
-    "ethers": "^6.15.0",
-    "ws": "^8.18.3"
+    "ethers": "6.17.0",
+    "ws": "^8.21.0"
   }
 }

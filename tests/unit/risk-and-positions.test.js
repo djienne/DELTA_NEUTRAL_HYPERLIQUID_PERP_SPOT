@@ -22,7 +22,7 @@ test('maxSpreadPercent is the preferred bid-ask spread threshold key', () => {
 test('risk defaults are stable', () => {
   assert.equal(getMinFillRatio({}), 0.999);
   assert.equal(getMaxOpenHedgeMismatchPercent({}), 2);
-  assert.equal(getMaxHedgeMismatchPercent({}), 30);
+  assert.equal(getMaxHedgeMismatchPercent({}), 2);
   assert.equal(getStartupCleanupMode({}), 'hedge-only');
 });
 

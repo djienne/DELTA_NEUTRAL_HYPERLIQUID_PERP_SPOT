@@ -58,7 +58,7 @@
   "risk": {
     "minFillRatio": 0.999,
     "maxOpenHedgeMismatchPercent": 2,
-    "maxHedgeMismatchPercent": 30,
+    "maxHedgeMismatchPercent": 2,
     "startupCleanupMode": "hedge-only",
     "notes": "startupCleanupMode: report-only, hedge-only, or hedge-or-close. Managed spot symbols default to trading.pairs mapped to SPOT symbols. Set managedSpotSymbols only to override that default."
   },

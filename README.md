@@ -126,6 +126,7 @@ node tests/hedge-positions.js --execute   # Fix imbalances
 ### Testing
 ```bash
 npm test                                 # Unit tests (no network, no orders)
+node tests/check-paper-smoke.js            # Public-data paper open/close, temporary account, no credentials
 node tests/check-switch-calibration.js   # Re-estimate switch parameters from public history (read-only)
 ```
 
@@ -157,7 +158,7 @@ docker compose stop paper-bot                    # pause; the run continues wher
 | Fees | perp 0.045% in USDC, spot 0.07% taken from the received asset | your fee tier |
 | Funding | realized hourly rate × position held at that hour × hourly close price | exchange |
 | Liquidation (1x isolated short, ~+70–97%) | 15-min candle highs, the whole margin is lost | exchange (mark price) |
-| PERP ↔ SPOT transfer | a simulated you: makes exactly the transfer the bot asks for, arrives after 1 h (`paper.transferDelayMinutes`); the bot is on hold meanwhile | you, in the UI |
+| PERP ↔ SPOT transfer | a simulated you: waits 1 h (`paper.transferDelayMinutes`), then moves the requested funds atomically; balances stay unchanged and the bot stays on hold until then | you, in the UI |
 
 **Known limitations**:
 - Your own orders don't move the book. Fine at these sizes; each fill walks every level it needs.
@@ -166,7 +167,7 @@ docker compose stop paper-bot                    # pause; the run continues wher
   - funding lands in the isolated margin;
   - spot buys are checked against the fill price, not the limit price. Orders that a strict limit-price check would reject are counted as `would_reject_strict` in the stats.
 - Fees are the config rates (base tier by default).
-- The simulated operator always answers in exactly 1 h.
+- The simulated operator always answers in exactly 1 h. Pending responses survive restarts; transfers created by older versions that already debited the source settle without a second debit.
 
 **Stats** (`python paper_stats.py`):
 - Equity, net PnL and APR.
@@ -202,6 +203,7 @@ For a sub-account, create the API key on the master account. Move USDC between t
 - `paper.startPerpUSDC` / `paper.startSpotUSDC` / `paper.transferDelayMinutes`: Paper account start and simulated transfer delay (paper only)
 - `thresholds.minVolumeUSDC`: Min 24h volume (default: $75M)
 - `thresholds.minFundingRatePercent`: Min funding APY (default: 5%)
+- `risk.maxHedgeMismatchPercent`: Maximum live size mismatch (default: 2%); differences below the executable order minimum are reported as dust.
 - `risk.minFillRatio`: Minimum fill ratio required before an order is treated as complete
 - `risk.startupCleanupMode`: Startup behavior for imbalanced exposure (`report-only`, `hedge-only`, or `hedge-or-close`; default: `hedge-only`)
 
@@ -251,3 +253,15 @@ bot.js (main loop)
 ## Detailed Documentation
 
 See [CLAUDE.md](CLAUDE.md) for the decision flow, order-execution rules, Hyperliquid API specifics and known pitfalls.
+
+## Recovery and accounting guarantees
+
+- Pending closes finish reducing the remaining legs; they never recreate a leg that already closed. Recovery runs before each decision cycle and at startup. Unresolved intents block new positions.
+- Verification examines the entire managed account. Multiple pairs or a symbol inconsistent with state require manual resolution. Every recovery order that adds perpetual exposure must first receive confirmation of 1x isolated leverage.
+- Entry and live hedge checks use the same size-mismatch definition: absolute size difference divided by the larger leg. The default limit is 2%. Lot-rounded differences below the $10 order minimum remain visible as dust and are not repeatedly ordered.
+- Entry and exit funding decisions require 168 distinct consecutive hourly observations in the requested seven-day window. Missing history never falls back to the current hour. Recovery closes do not depend on funding history.
+- All orders use validated books no older than ten seconds. Entries refresh both books and recheck spreads, basis, sizes and hedge mismatch. Exit and cleanup orders use fresh prices without entry filters.
+- Close accounting includes all fills and retries. Known fees and estimates for missing fees are kept separately. Remaining dust is inventory, not a realized sale. History records `accountingComplete`, nullable `totalPnl`, `closeFills` and `residualInventory`; unavailable PnL is counted separately, not as zero. Existing history is not rewritten. Crash recovery preserves known entry information and labels missing historical costs unknown.
+- Paper equity snapshots include `pendingOperatorTransfer` for time waiting for the operator. Cash-flow statistics remain distinct from the bot's history totals.
+
+Liquidation-distance protection is not implemented. Paper liquidation still approximates mark-price events with candle extremes and assumes loss of the whole isolated margin; those stress losses are not a faithful reconstruction of exchange book liquidation. A passing smoke check validates execution/accounting mechanics, not investment returns.

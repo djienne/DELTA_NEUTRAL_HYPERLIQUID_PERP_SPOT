@@ -54,6 +54,7 @@ function compactPositionData(positionData) {
     positionValue: positionData.positionValue,
     fundingRate: positionData.fundingRate,
     annualizedFunding: positionData.annualizedFunding,
+    accountingComplete: positionData.accountingComplete !== false,
     openFeesActual: positionData.openFeesActual || 0,
     openFeesEstimated: positionData.openFeesEstimated || 0,
     orderSummary: {
@@ -173,7 +174,7 @@ export function hasPosition(state) {
 export function recordPosition(state, positionData) {
   const position = {
     ...compactPositionData(positionData),
-    openTime: positionData.openTime || Date.now(),
+    openTime: Object.hasOwn(positionData, 'openTime') ? positionData.openTime : Date.now(),
     lastCheckTime: Date.now()
   };
 
@@ -213,6 +214,9 @@ export function closePosition(state, closeData) {
     return state;
   }
 
+  const pricePnl = Object.hasOwn(closeData, 'pricePnl') ? closeData.pricePnl :
+    [closeData.perpPnl, closeData.spotPnl].every(Number.isFinite) ? closeData.perpPnl + closeData.spotPnl : null;
+
   // Move position to history
   const historicalPosition = {
     ...state.position,
@@ -222,19 +226,22 @@ export function closePosition(state, closeData) {
     spotClosePrice: closeData.spotClosePrice,
     perpPnl: closeData.perpPnl,
     spotPnl: closeData.spotPnl,
-    pricePnl: closeData.pricePnl ?? ((closeData.perpPnl || 0) + (closeData.spotPnl || 0)),
-    fundingPnl: closeData.fundingPnl || 0,
+    pricePnl,
+    fundingPnl: closeData.fundingPnl ?? null,
+    accountingComplete: closeData.accountingComplete !== false && Number.isFinite(closeData.totalPnl),
+    residualInventory: closeData.residualInventory ?? null,
+    closeFills: closeData.closeFills ?? null,
     feesActual: closeData.feesActual || 0,
     feesEstimated: closeData.feesEstimated || 0,
     pnl: {
-      price: closeData.pricePnl ?? ((closeData.perpPnl || 0) + (closeData.spotPnl || 0)),
-      funding: closeData.fundingPnl || 0,
+      price: pricePnl,
+      funding: closeData.fundingPnl ?? null,
       feesActual: closeData.feesActual || 0,
       feesEstimated: closeData.feesEstimated || 0,
       total: closeData.totalPnl
     },
     totalPnl: closeData.totalPnl,
-    duration: Date.now() - state.position.openTime
+    duration: Number.isFinite(state.position.openTime) ? Date.now() - state.position.openTime : null
   };
 
   return {
@@ -270,7 +277,7 @@ export function updateCheckTime(state) {
  * @returns {number} Age in milliseconds
  */
 export function getPositionAge(position) {
-  if (!position) {
+  if (!position || !Number.isFinite(position.openTime)) {
     return 0;
   }
 
@@ -284,7 +291,7 @@ export function getPositionAge(position) {
  * @returns {boolean} True if can close
  */
 export function canClosePosition(position, minHoldTimeMs) {
-  if (!position) {
+  if (!position || !Number.isFinite(position.openTime)) {
     return false;
   }
 
@@ -309,8 +316,8 @@ export function formatPosition(position) {
 Position: ${position.symbol} Delta-Neutral
   PERP: SHORT ${position.perpSize} @ $${position.perpEntryPrice}
   SPOT: LONG ${position.spotSize} @ $${position.spotEntryPrice}
-  Funding Rate: ${(position.fundingRate * 100).toFixed(4)}% (${(position.annualizedFunding * 100).toFixed(2)}% APY)
-  Open Time: ${new Date(position.openTime).toLocaleString()}
+  Funding Rate at entry: ${position.fundingRate == null ? 'unknown' : (position.fundingRate * 100).toFixed(4) + '%'} (${position.annualizedFunding == null ? 'unknown' : (position.annualizedFunding * 100).toFixed(2) + '% annualized'})
+  Open Time: ${Number.isFinite(position.openTime) ? new Date(position.openTime).toLocaleString() : 'unknown'}
   Age: ${ageHours}h (${ageDays} days)
   Position Value: $${position.positionValue?.toFixed(2) || 'N/A'}
 `.trim();
@@ -326,21 +333,26 @@ export function getHistoryStats(state) {
     return {
       totalPositions: 0,
       totalPnl: 0,
+      unavailablePnlCount: 0,
       avgDuration: 0,
       avgFundingRate: 0
     };
   }
 
   const totalPositions = state.history.length;
-  const totalPnl = state.history.reduce((sum, p) => sum + (p.pnl?.total ?? p.totalPnl ?? 0), 0);
-  const avgDuration = state.history.reduce((sum, p) => sum + (p.duration || 0), 0) / totalPositions;
-  const avgFundingRate = state.history.reduce((sum, p) => sum + (p.annualizedFunding || 0), 0) / totalPositions;
+  const known = state.history.filter(p => p.accountingComplete !== false && Number.isFinite(p.pnl?.total ?? p.totalPnl));
+  const totalPnl = known.reduce((sum, p) => sum + (p.pnl?.total ?? p.totalPnl), 0);
+  const durations = state.history.map(p => p.duration).filter(Number.isFinite);
+  const fundingRates = state.history.map(p => p.annualizedFunding).filter(Number.isFinite);
+  const avgDuration = durations.length ? durations.reduce((sum, n) => sum + n, 0) / durations.length : null;
+  const avgFundingRate = fundingRates.length ? fundingRates.reduce((sum, n) => sum + n, 0) / fundingRates.length : null;
 
   return {
     totalPositions,
     totalPnl,
+    unavailablePnlCount: totalPositions - known.length,
     avgDuration,
-    avgDurationDays: avgDuration / (1000 * 60 * 60 * 24),
-    avgFundingRate: avgFundingRate * 100  // Convert to percentage
+    avgDurationDays: avgDuration === null ? null : avgDuration / (1000 * 60 * 60 * 24),
+    avgFundingRate: avgFundingRate === null ? null : avgFundingRate * 100
   };
 }

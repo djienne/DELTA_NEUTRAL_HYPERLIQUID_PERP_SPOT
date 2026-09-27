@@ -11,11 +11,11 @@ export function getMinFillRatio(config = {}) {
 }
 
 export function getMaxHedgeMismatchPercent(config = {}) {
-  return config.risk?.maxHedgeMismatchPercent ?? 30;
+  return config.risk?.maxHedgeMismatchPercent ?? 2;
 }
 
 export function getMaxOpenHedgeMismatchPercent(config = {}) {
-  return config.risk?.maxOpenHedgeMismatchPercent ?? 2;
+  return Math.min(config.risk?.maxOpenHedgeMismatchPercent ?? 2, getMaxHedgeMismatchPercent(config));
 }
 
 // Taker fee per leg (fraction of notional). Defaults are Hyperliquid base tier: perp 0.045%, spot 0.07%.

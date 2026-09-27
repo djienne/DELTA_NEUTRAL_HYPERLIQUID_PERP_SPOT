@@ -1360,6 +1360,16 @@ class HyperliquidConnector extends EventEmitter {
     return this.getBidAsk(coin);
   }
 
+  async getFreshBidAsk(coin, { force = false, maxAgeMs = this.maxOrderbookAgeMs } = {}) {
+    const valid = book => book && Number.isFinite(book.bid) && Number.isFinite(book.ask) &&
+      book.bid > 0 && book.ask >= book.bid && Number.isFinite(book.timestamp) &&
+      Date.now() - book.timestamp >= -1000 && Date.now() - book.timestamp <= maxAgeMs;
+    let book = this.getBidAsk(coin);
+    if (force || !valid(book)) book = await this.refreshOrderbookSnapshot(coin);
+    if (!valid(book)) throw new Error(`No fresh valid orderbook for ${coin}`);
+    return book;
+  }
+
   /**
    * Create a market order
    * For Hyperliquid, market orders are IOC (Immediate or Cancel) limit orders with aggressive pricing
@@ -1390,34 +1400,11 @@ class HyperliquidConnector extends EventEmitter {
       : (options.slippage !== undefined ? options.slippage : 5);
     const slippageDecimal = this.normalizeSlippagePercent(slippagePercent);
 
-    let midPrice;
-    if (options.overrideMidPrice && Number.isFinite(options.overrideMidPrice)) {
-      midPrice = options.overrideMidPrice;
-      console.log(`[Hyperliquid] Using provided override mid-price: ${midPrice}`);
-    } else {
-      const maxOrderbookAgeMs = options.maxOrderbookAgeMs ?? this.maxOrderbookAgeMs;
-      let bidAsk = this.getBidAsk(orderbookCoin);
-
-      if (!bidAsk || !bidAsk.bid || !bidAsk.ask) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        bidAsk = this.getBidAsk(orderbookCoin);
-        if (!bidAsk || !bidAsk.bid || !bidAsk.ask) {
-          bidAsk = await this.refreshOrderbookSnapshot(orderbookCoin);
-        }
-      }
-
-      if (Date.now() - bidAsk.timestamp > maxOrderbookAgeMs) {
-        console.warn(`[Hyperliquid] Cached orderbook for ${coin} is stale (${Date.now() - bidAsk.timestamp}ms), refreshing via REST`);
-        bidAsk = await this.refreshOrderbookSnapshot(orderbookCoin);
-      }
-
-      if (!bidAsk || !Number.isFinite(bidAsk.bid) || !Number.isFinite(bidAsk.ask) || bidAsk.bid <= 0 || bidAsk.ask <= 0) {
-        throw new Error(`No fresh orderbook data available for ${coin} to create market order.`);
-      }
-
-      console.log(`[Hyperliquid] Using prices (age: ${Date.now() - bidAsk.timestamp}ms): bid=${bidAsk.bid}, ask=${bidAsk.ask}`);
-      midPrice = (bidAsk.bid + bidAsk.ask) / 2;
+    if (options.overrideMidPrice !== undefined) {
+      throw new Error('overrideMidPrice is unsupported; orders require a fresh orderbook');
     }
+    const bidAsk = await this.getFreshBidAsk(orderbookCoin, { maxAgeMs: options.maxOrderbookAgeMs ?? this.maxOrderbookAgeMs });
+    const midPrice = (bidAsk.bid + bidAsk.ask) / 2;
 
     // Calculate limit price with slippage (matching Python SDK logic):
     // - For buy: midPrice * (1 + slippage)

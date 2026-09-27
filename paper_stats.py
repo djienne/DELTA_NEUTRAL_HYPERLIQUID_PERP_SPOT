@@ -104,7 +104,7 @@ def main():
 
     # ---- time use, from the 15-min snapshots (gaps while the PC is off are simply not counted)
     in_mkt = [s for s in snaps if s['positions']]
-    waiting = [s for s in snaps if not s['positions'] and s['transit'] > 0]
+    waiting = [s for s in snaps if not s['positions'] and (s['transit'] > 0 or s.get('pendingOperatorTransfer', False))]
     util = [sum(abs(p['szi']) * p['mark'] for p in s['positions'].values()) / s['equity'] for s in in_mkt]
 
     # ---- risk: drawdown on the equity curve (transfers in transit included), daily Sharpe
@@ -127,7 +127,7 @@ def main():
     state = json.loads(state_file.read_text(encoding='utf-8')) if state_file.exists() else {}
     history = state.get('history', [])
     current = state.get('position')
-    positions = sorted(history + ([current] if current else []), key=lambda p: p.get('openTime', 0))
+    positions = sorted(history + ([current] if current else []), key=lambda p: p.get('openTime') or 0)
     opens = Counter(p['symbol'] for p in positions)
     switches = sum(a['symbol'] != b['symbol'] for a, b in zip(positions, positions[1:]))
     holds = [p['duration'] for p in history if p.get('duration')]
@@ -163,7 +163,10 @@ def main():
     if holds:
         print(f'  Holding time (closed positions): mean {dur(statistics.mean(holds))}, median {dur(statistics.median(holds))}')
     if current:
-        print(f'  Current position: {current["symbol"]}, held {dur(last["t"] - current["openTime"])}')
+        age = dur(last['t'] - current['openTime']) if current.get('openTime') else 'unknown'
+        print(f'  Current position: {current["symbol"]}, held {age}')
+    unavailable = sum(p.get('accountingComplete') is False or p.get('totalPnl') is None for p in history)
+    print(f'  Closed positions with unavailable bot PnL: {unavailable} (event-based equity above is separate)')
     if transfers:
         waits = [e['t'] - e['startedAt'] for e in transfers]
         print(f'  Simulated manual transfers: {len(transfers)}, {sum(e["amount"] for e in transfers):.2f} USDC, mean wait {dur(statistics.mean(waits))}')

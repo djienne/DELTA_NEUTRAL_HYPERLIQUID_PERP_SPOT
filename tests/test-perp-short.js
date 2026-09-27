@@ -44,7 +44,6 @@ async function testPerpShort(hyperliquid, symbol, sizeUSD = 15) {
     const sellResult = await hyperliquid.createMarketOrder(symbol, 'sell', sizeRounded, {
       isSpot: false,
       slippage: config.trading.maxSlippagePercent,
-      overrideMidPrice: midPrice
     });
 
     const sellFilled = sellResult.response?.data?.statuses?.[0]?.filled;

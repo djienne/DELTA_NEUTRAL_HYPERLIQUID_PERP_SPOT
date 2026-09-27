@@ -8,7 +8,7 @@ Automated delta-neutral bot for Hyperliquid: SHORT PERP + LONG SPOT of the same 
 (positive funding = longs pay shorts). It holds one pair at a time, picks the pair with the best **7-day average**
 funding, and switches only when the expected gain beats trading costs.
 
-The account must be **dedicated** to the bot: every PERP position and SPOT balance of the configured pairs is
+The account must be **dedicated** to the bot: every managed PERP position and SPOT balance of the configured pairs is
 treated as bot exposure and may be hedged, resized or closed.
 
 ## Commands
@@ -57,7 +57,7 @@ Never run them from an agent session.
 - `utils/paper-exchange.js`: `PaperConnector extends HyperliquidConnector` for `PAPER_TRADING=1`. Signed requests
   (`fetchJsonWithTimeout(exchangeUrl)`) are answered by a simulated account (exchange-style order checks, book-walk
   IOC fills, fees, isolated margin + liquidation, hourly funding replayed after outages, a simulated human who makes
-  the transfer asked in `rebalance-status.json`, landing after 1 h); user info queries are served from its ledger,
+  the transfer asked in `rebalance-status.json`, applied atomically after a 1 h operator response delay); user info queries are served from its ledger,
   anything else is live public data. Header documents every mechanic and assumption.
 - Market data: `funding.js` (current + 7d history), `volume.js` (`dayNtlVlm`, already USD), `spread.js`, `arbitrage.js`.
 
@@ -161,5 +161,9 @@ sub-account/vault: info queries use `wallet_address`, and every signed action (o
   or funding is `null`, so the pair is rejected, never counted as 0.
 - Tables reserve a sign column: `n >= 0 ? ' ' + n.toFixed(d) : n.toFixed(d)`.
 - Rate-limit (429) errors on market data use `retryWithExponentialBackoff` in `bot.js`.
-- Hedge quality: PERFECT < 5% size mismatch, GOOD < 15%, PARTIAL < 30%, WEAK ≥ 30% (`utils/positions.js`).
+- Hedge enforcement: 2% difference divided by the larger leg; larger differences are repaired only when executable after lot rounding. Quality labels are descriptive, not the safety threshold.
 - New logic gets a unit test in `tests/unit/` with a fake connector; see `trade-cleanup.test.js` for the fake's shape.
+
+### Recovery changes
+
+Use the recovery and accounting guarantees in README.md. Closing intents are reduction-only and take precedence over startup hedging. Ambiguous multi-pair exposure blocks decisions. `reconcilePendingIntent(connector, state, persist)` returns the updated state and preserves unresolved intents. Quote overrides are unsupported; use `getFreshBidAsk`, including its timestamp validation. Unknown entry prices/opening times and incomplete PnL are nullable and must never be replaced with market prices or zero. `node tests/check-paper-smoke.js` exercises public-data selection and the real open/close path with a temporary simulated account; it cannot submit live orders.

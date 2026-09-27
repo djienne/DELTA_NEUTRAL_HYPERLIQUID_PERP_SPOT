@@ -83,9 +83,9 @@ export async function updateLeverage(hyperliquid, coin, leverage, isCross = fals
     // previously-set 20x isolated, a $300 short posts $15 of margin and liquidates
     // on roughly a 5% adverse move -- leaving the spot leg naked, from a position
     // the operator believed was 1x and market-neutral.
-    if (result?.status && result.status !== 'ok') {
+    if (result?.status !== 'ok') {
       throw new Error(
-        `Leverage update rejected for ${coin}: ${JSON.stringify(result.response ?? result)}`
+        `Leverage update rejected for ${coin}: ${JSON.stringify(result?.response ?? result)}`
       );
     }
     // The nested statuses array carries per-action errors even when status === 'ok'.

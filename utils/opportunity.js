@@ -239,7 +239,7 @@ export function filterOpportunities(marketData, thresholds) {
 
     // Decisions use the trailing 7-day average. It predicts the next 14 days far better than the
     // one-hour predicted rate (corr 0.53 vs 0.23 on 2y of data; see tests/check-switch-calibration.js).
-    const avgFundingRate = funding.history?.avg?.annualized ?? funding.annualizedRate;
+    const avgFundingRate = funding.history?.count === 168 ? funding.history.avg?.annualized : null;
 
     if (!isFiniteNumber(avgFundingRate)) {
       rejected.funding.push({ symbol, avgFunding: null, threshold: minFundingRatePercent, error: 'non-finite funding' });

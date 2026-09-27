@@ -21,7 +21,7 @@ function baseMarketData(overrides = {}) {
         symbol: 'BTC',
         fundingRate: 0.001,
         annualizedRate: 0.1,
-        history: { avg: { annualized: 0.1 } }
+        history: { count: 168, avg: { annualized: 0.1 } }
       }
     ],
     ...overrides
@@ -60,7 +60,7 @@ test('opportunity filtering keeps valid complete spread data', () => {
 
 test('opportunity filtering rejects non-finite 7d funding', () => {
   const result = filterOpportunities(baseMarketData({
-    fundingRates: [{ symbol: 'BTC', fundingRate: 0.001, annualizedRate: NaN, history: { avg: { annualized: NaN } } }]
+    fundingRates: [{ symbol: 'BTC', fundingRate: 0.001, annualizedRate: NaN, history: { count: 168, avg: { annualized: NaN } } }]
   }), {
     maxSpreadPercent: 0.15,
     maxPerpSpotSpreadPercent: 0.5,
@@ -77,7 +77,7 @@ test('held position is judged on its 7d average even when filtered out of the ra
   const analysis = {
     rankedOpportunities: [],
     marketData: {
-      fundingRates: [{ symbol: 'BTC', annualizedRate: 0.3, history: { avg: { annualized: -0.02 } } }]
+      fundingRates: [{ symbol: 'BTC', annualizedRate: 0.3, history: { count: 168, avg: { annualized: -0.02 } } }]
     }
   };
 

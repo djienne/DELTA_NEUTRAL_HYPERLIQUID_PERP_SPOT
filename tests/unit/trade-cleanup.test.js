@@ -139,6 +139,7 @@ function makeHyperliquid(handler, options = {}) {
     getCoinForOrderbook(symbol, assetId) {
       return assetId >= 100 ? '@1' : symbol;
     },
+    async getFreshBidAsk() { return { bid: 99.99, ask: 100.01, mid: 100, timestamp: Date.now() }; },
     async getAllMids() {
       return { BTC: '100', '@1': '100' };
     },
@@ -169,7 +170,7 @@ function makeHyperliquid(handler, options = {}) {
   };
 }
 
-test('SPOT cleanup after PERP failure is not reduce-only and uses override price', async () => {
+test('SPOT cleanup after PERP failure is not reduce-only and requires connector pricing', async () => {
 
   const hyperliquid = makeHyperliquid(({ symbol, side }) => {
     if (symbol === 'BTC' && side === 'sell') return failed('perp failed');
@@ -188,11 +189,11 @@ test('SPOT cleanup after PERP failure is not reduce-only and uses override price
   assert.equal(cleanup.side, 'sell');
   assert.equal(cleanup.options.isSpot, true);
   assert.equal(cleanup.options.reduceOnly, false);
-  assert.equal(cleanup.options.overrideMidPrice, 100);
+  assert.equal(cleanup.options.overrideMidPrice, undefined);
 
 });
 
-test('PERP cleanup after SPOT failure is reduce-only and uses override price', async () => {
+test('PERP cleanup after SPOT failure is reduce-only and requires connector pricing', async () => {
 
   const hyperliquid = makeHyperliquid(({ symbol, side }) => {
     if (symbol === 'BTC' && side === 'sell') return filled('1');
@@ -211,7 +212,7 @@ test('PERP cleanup after SPOT failure is reduce-only and uses override price', a
   assert.equal(cleanup.side, 'buy');
   assert.equal(cleanup.options.isSpot, false);
   assert.equal(cleanup.options.reduceOnly, true);
-  assert.equal(cleanup.options.overrideMidPrice, 100);
+  assert.equal(cleanup.options.overrideMidPrice, undefined);
 
 });
 

@@ -144,7 +144,8 @@ export async function getFundingHistory(hyperliquid, coin, days = 7, options = {
   const { verbose = false } = options;
 
   try {
-    const startTime = Date.now() - days * 24 * 60 * 60 * 1000;
+    const endTime = Date.now();
+    const startTime = endTime - days * 24 * 60 * 60 * 1000;
 
     if (verbose) {
       console.log(`Fetching ${days}-day funding history for ${coin}...`);
@@ -153,8 +154,11 @@ export async function getFundingHistory(hyperliquid, coin, days = 7, options = {
     const data = await hyperliquid.infoRequest({
       type: 'fundingHistory',
       coin: coin,
-      startTime: startTime
+      startTime: startTime,
+      endTime
     }, 20);
+
+    validateFundingWindow(data, startTime, endTime, days * 24);
 
     if (verbose) {
       console.log(`✅ Fetched ${data.length} funding rate entries for ${coin}`);
@@ -164,13 +168,31 @@ export async function getFundingHistory(hyperliquid, coin, days = 7, options = {
       coin: coin,
       history: data,
       startTime: startTime,
-      endTime: Date.now(),
+      endTime,
       days: days
     };
 
   } catch (error) {
     console.error(`Error fetching funding history for ${coin}:`, error.message);
     throw error;
+  }
+}
+
+// A short or gapped sample is not a seven-day estimator, even if its mean is finite.
+export function validateFundingWindow(history, startTime, endTime, expectedHours = 168) {
+  if (!Array.isArray(history) || history.length !== expectedHours) {
+    throw new Error(`Incomplete funding history: expected ${expectedHours} hourly observations`);
+  }
+  const hours = history.map(row => {
+    const time = Number(row.time);
+    if (!Number.isFinite(time) || time < startTime || time > endTime || row.fundingRate === null ||
+        String(row.fundingRate).trim() === '' || !Number.isFinite(Number(row.fundingRate))) {
+      throw new Error('Invalid funding observation or timestamp outside requested window');
+    }
+    return Math.floor(time / 3600000);
+  }).sort((a, b) => a - b);
+  if (hours.some((hour, i) => i > 0 && hour !== hours[i - 1] + 1)) {
+    throw new Error('Funding history contains duplicate or missing hours');
   }
 }
 

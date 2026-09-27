@@ -12,6 +12,7 @@ const MINUTE = 60000;
 
 const config = {
   trading: { minOrderSizeUSD: { BTC: 20 }, balanceUtilizationPercent: 95, maxSlippagePercent: 5, takerFeeRate: 0.00045, spotTakerFeeRate: 0.0007 },
+  thresholds: { maxSpreadPercent: 0.25 },
   risk: { minFillRatio: 0.999, maxHedgeMismatchPercent: 10 },
   bot: { maxBalanceImbalancePercent: 10 },
   paper: { startPerpUSDC: 500, startSpotUSDC: 500, transferDelayMinutes: 60 }
@@ -151,8 +152,8 @@ test('simulated manual transfer: does what rebalance-status.json asks, one at a 
   ask('SPOT_TO_PERP', 100);
   const started = paper.mutate(L => paper.operator(L, now));
   assert.equal(started[0].amount, 100);
-  assert.equal(paper.ledger.spotUSDC, 500);
-  assert.equal(paper.ledger.perpUSDC, 400);                      // in transit: bot still sees 400 / 500 and holds
+  assert.equal(paper.ledger.spotUSDC, 600);
+  assert.equal(paper.ledger.perpUSDC, 400);                      // operator has not acted: bot still sees 400 / 600 and holds
   assert.equal(paper.equity(mids).equity, 1000);                  // no fake drawdown
   assert.deepEqual(paper.mutate(L => paper.operator(L, now)), []);  // one transfer at a time
 
@@ -192,9 +193,44 @@ test('safety: WebSocket orders go to the simulator, user queries fail closed, no
 
   paper.connected = true;
   paper.ws = { send: () => { throw new Error('paper orders must not use the WebSocket'); } };
-  const result = await paper.createMarketOrder('BTC', 'sell', 0.5, { overrideMidPrice: 100 });
+  const result = await paper.createMarketOrder('BTC', 'sell', 0.5, {});
   assert.ok(result.response.data.statuses[0].filled);
 
   await assert.rejects(() => paper.infoRequest({ type: 'userFills', user: paper.wallet }), /not simulated/);
   assert.ok(!market.requests.some(r => r.url.includes('/exchange')));
+});
+
+
+test('operator response delay keeps 440/560 on hold; restart settles once and preserves equity', async () => {
+  const { checkAndReportBalances } = await import('../../utils/balance.js');
+  const { paper, dir } = makePaper();
+  const now = Date.now();
+  paper.mutate(L => { L.perpUSDC=440; L.spotUSDC=560; });
+  fs.writeFileSync(path.join(dir,'rebalance-status.json'),JSON.stringify({rebalanceNeeded:true,direction:'SPOT_TO_PERP',amountUSDC:60,updated:new Date(now).toISOString()}));
+  paper.mutate(L=>paper.operator(L,now));
+  assert.equal(paper.ledger.spotUSDC,560);
+  assert.equal((await checkAndReportBalances(paper,5)).balanceCheck.isBalanced,false);
+  const reloaded=new PaperConnector(config,{dir,fetch:paper.fetch});
+  const mids={BTC:'100','@142':'100'};
+  await reloaded.loadMeta();
+  assert.equal(reloaded.equity(mids).equity,1000);
+  assert.equal(reloaded.equity(mids).pendingOperatorTransfer,true);
+  assert.equal(reloaded.equity(mids).transit,0);
+  reloaded.mutate(L=>reloaded.landTransfers(L,now+59*MINUTE));
+  assert.equal(reloaded.ledger.perpUSDC,440);
+  reloaded.mutate(L=>reloaded.landTransfers(L,now+60*MINUTE));
+  reloaded.mutate(L=>reloaded.landTransfers(L,now+61*MINUTE));
+  assert.equal(reloaded.ledger.perpUSDC,500);assert.equal(reloaded.ledger.spotUSDC,500);
+  assert.equal(reloaded.equity(mids).equity,1000);
+  assert.equal(reloaded.equity(mids).pendingOperatorTransfer,false);
+});
+
+test('legacy in-transit transfer credits once without a second debit', async () => {
+  const {paper}=makePaper();await paper.loadMeta();const now=Date.now();
+  paper.mutate(L=>{L.perpUSDC=440;L.spotUSDC=500;L.transfers=[{amount:60,to:'perp',startedAt:now-MINUTE,eta:now}];});
+  const mids={BTC:'100','@142':'100'};
+  assert.equal(paper.equity(mids).equity,1000);
+  paper.mutate(L=>paper.landTransfers(L,now));paper.mutate(L=>paper.landTransfers(L,now));
+  assert.equal(paper.ledger.perpUSDC,500);assert.equal(paper.ledger.spotUSDC,500);
+  assert.equal(paper.equity(mids).equity,1000);
 });

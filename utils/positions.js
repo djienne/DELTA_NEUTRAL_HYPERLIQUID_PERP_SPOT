@@ -1,4 +1,5 @@
 import HyperliquidConnector from '../hyperliquid.js';
+import { getSizeMismatchPercent } from './order-fill.js';
 
 /**
  * Position Utilities
@@ -13,9 +14,20 @@ import HyperliquidConnector from '../hyperliquid.js';
  *   (e.g., SHORT 1 BTC perp + LONG 1 BTC spot)
  */
 
-// Hyperliquid refuses orders below $10 notional, so smaller exposure can never be traded away.
-// Reporting it as exposure made the bot halt forever on sub-lot dust left after a close.
+// The connector's minimum order size. Dust remains inventory, even when it cannot be traded alone.
 export const MIN_NOTIONAL_USD = 10;
+
+export async function executableSize(hyperliquid, symbol, isSpot, size, price) {
+  if (!Number.isFinite(size) || size < 0 || !Number.isFinite(price) || price <= 0) {
+    throw new Error(`Invalid exposure or price for ${symbol}`);
+  }
+  if (size * price < MIN_NOTIONAL_USD) return 0;
+  const assetId = await hyperliquid.getAssetId(symbol, isSpot);
+  const { szDecimals } = hyperliquid.getAssetInfo(symbol, assetId);
+  if (size < 10 ** -szDecimals) return 0;
+  const rounded = Number(hyperliquid.roundSize(size, szDecimals, 'down'));
+  return rounded * price >= MIN_NOTIONAL_USD ? rounded : 0;
+}
 
 /**
  * Get PERP positions from clearinghouse state
@@ -27,7 +39,7 @@ export const MIN_NOTIONAL_USD = 10;
  * @returns {Promise<Object[]>} Array of PERP position objects
  */
 export async function getPerpPositions(hyperliquid, user = null, options = {}) {
-  const { verbose = false, managedPerpSymbols = null } = options;
+  const { verbose = false, managedPerpSymbols = null, includeDust = false } = options;
   const managedSet = managedPerpSymbols ? new Set(managedPerpSymbols) : null;
 
   try {
@@ -45,6 +57,7 @@ export async function getPerpPositions(hyperliquid, user = null, options = {}) {
       type: 'clearinghouseState',
       user: user
     }, 2);
+    if (!Array.isArray(data?.assetPositions)) throw new Error('Invalid perpetual account response');
 
     // Get asset metadata to map positions to symbols
     const meta = await hyperliquid.getMeta();
@@ -81,7 +94,10 @@ export async function getPerpPositions(hyperliquid, user = null, options = {}) {
         // Determine side (positive size = long, negative = short)
         const side = size > 0 ? 'LONG' : size < 0 ? 'SHORT' : 'NONE';
 
-        if ((!managedSet || managedSet.has(symbol)) && Math.abs(positionValue) >= MIN_NOTIONAL_USD) {
+        if ((!managedSet || managedSet.has(symbol)) && (!Number.isFinite(size) || !Number.isFinite(positionValue))) {
+          throw new Error(`Invalid perpetual exposure for ${symbol}`);
+        }
+        if ((!managedSet || managedSet.has(symbol)) && size !== 0 && (includeDust || Math.abs(positionValue) >= MIN_NOTIONAL_USD)) {
           positions.push({
             symbol: symbol,
             side: side,
@@ -121,7 +137,7 @@ export async function getPerpPositions(hyperliquid, user = null, options = {}) {
  * @returns {Promise<Object[]>} Array of SPOT balance objects
  */
 export async function getSpotBalances(hyperliquid, user = null, options = {}) {
-  const { verbose = false, managedSpotSymbols = null } = options;
+  const { verbose = false, managedSpotSymbols = null, includeDust = false } = options;
   const managedSet = managedSpotSymbols ? new Set(managedSpotSymbols) : null;
 
   try {
@@ -139,6 +155,7 @@ export async function getSpotBalances(hyperliquid, user = null, options = {}) {
       type: 'spotClearinghouseState',
       user: user
     }, 2);
+    if (!Array.isArray(data?.balances)) throw new Error('Invalid spot account response');
 
     const balances = [];
     // Spot tokens are priced with their perp mid (same underlying; basis is filtered to <= 0.5%).
@@ -151,12 +168,15 @@ export async function getSpotBalances(hyperliquid, user = null, options = {}) {
         const total = parseFloat(balance.total || '0');
         const hold = parseFloat(balance.hold || '0');
         const available = total - hold;
+        if ((!managedSet || managedSet.has(coin)) && (!Number.isFinite(total) || !Number.isFinite(hold) || total < 0 || hold < 0 || hold > total)) {
+          throw new Error(`Invalid spot exposure for ${coin}`);
+        }
         const price = parseFloat(mids[HyperliquidConnector.spotToPerp(coin)]);
         const valueUSD = total * price;
 
         // Only non-USDC balances worth at least MIN_NOTIONAL_USD (unknown price is kept, not dropped)
         if (coin !== 'USDC' && total > 0 && (!managedSet || managedSet.has(coin)) &&
-            !(valueUSD < MIN_NOTIONAL_USD)) {
+            (includeDust || !(valueUSD < MIN_NOTIONAL_USD))) {
           balances.push({
             symbol: coin,
             total: total,
@@ -214,7 +234,7 @@ export async function getAllPositions(hyperliquid, user = null, options = {}) {
  * @returns {Object} Delta-neutral analysis
  */
 export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
-  const { maxHedgeMismatchPercent = 30 } = options;
+  const { maxHedgeMismatchPercent = 2 } = options;
   const deltaNeutralPairs = [];
   const imbalancedPairs = [];
   const unmatchedPerp = [];
@@ -252,7 +272,7 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
 
       // Calculate mismatch percentage
       const sizeMismatch = Math.abs(perpSize - spotSize);
-      const sizeMismatchPct = (sizeMismatch / perpSize) * 100;
+      const sizeMismatchPct = getSizeMismatchPercent(perpSize, spotSize);
 
       // Determine hedge quality
       let hedgeQuality = 'NONE';
@@ -283,7 +303,7 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
         spotBalance: spotBalance
       };
 
-      if (isDeltaNeutral && sizeMismatchPct <= maxHedgeMismatchPercent) {
+      if (isDeltaNeutral && sizeMismatchPct <= maxHedgeMismatchPercent + 1e-9) {
         deltaNeutralPairs.push(pair);
       } else {
         imbalancedPairs.push(pair);

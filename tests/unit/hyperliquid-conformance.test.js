@@ -260,7 +260,8 @@ is_vault=True
     return { status: 'ok' };
   };
 
-  await connector.createMarketOrder('BTC', 'sell', 0.001, { overrideMidPrice: 100000 });
+  connector.getFreshBidAsk = async () => ({ bid: 99999, ask: 100001, mid: 100000, timestamp: Date.now() });
+  await connector.createMarketOrder('BTC', 'sell', 0.001);
   await updateLeverage(connector, 'BTC', 1, false);
 
   assert.deepEqual(sentVaults, [subAccount, ethers.getAddress(subAccount)]);
