@@ -10,6 +10,7 @@ import {
   getStartupCleanupMode
 } from '../../utils/risk.js';
 import { analyzeDeltaNeutral, getPerpPositions, getSpotBalances } from '../../utils/positions.js';
+import { checkBalanceDistribution } from '../../utils/balance.js';
 
 test('maxSpreadPercent is the preferred bid-ask spread threshold key', () => {
   assert.equal(getMaxBidAskSpreadPercent({ maxSpreadPercent: 0.25 }), 0.25);
@@ -97,4 +98,12 @@ test('exposure below the $10 order minimum is ignored as untradeable dust', asyn
   assert.deepEqual(perps.map(p => p.symbol), ['BTC']);
   assert.deepEqual(spots.map(b => b.symbol), ['UBTC', 'UNKNOWN']);
   assert.equal(spots[0].valueUSD, 50);
+});
+
+test('rebalance hold threshold: maxBalanceImbalancePercent 10 = 50/50 +-5 points (bot.js passes 10 / 2)', () => {
+  const split = perpPercent => ({ perpPercent, spotPercent: 100 - perpPercent });
+  assert.equal(checkBalanceDistribution(split(44), 10 / 2).isBalanced, false);  // 12% imbalance: ON HOLD
+  assert.equal(checkBalanceDistribution(split(56), 10 / 2).isBalanced, false);
+  assert.equal(checkBalanceDistribution(split(46), 10 / 2).isBalanced, true);   // 8% imbalance: trade
+  assert.equal(checkBalanceDistribution(split(54), 10 / 2).isBalanced, true);
 });

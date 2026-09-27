@@ -12,6 +12,8 @@ node_modules
 # Runtime state (mounted as a volume, never baked into the image)
 bot-state.json
 data/
+data-paper/
+rebalance-status.json
 _*.txt
 
 # Data files

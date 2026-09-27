@@ -9,6 +9,9 @@ import HyperliquidConnector from '../hyperliquid.js';
  * This script demonstrates how to:
  * 1. Sign a usdClassTransfer action using EIP-712
  * 2. Transfer funds from Spot to Perp (or vice versa)
+ *
+ * It needs the ACCOUNT's own private key: an API (agent) wallet key, as in hyperliquid.env, cannot transfer.
+ * The bot never transfers; it holds and asks for a manual transfer (see README, Manual PERP <-> SPOT Rebalancing).
  */
 
 const { wallet: HL_WALLET, privateKey: HL_PRIVATE_KEY, vaultAddress } = new HyperliquidConnector();

@@ -98,42 +98,48 @@ export function loadState() {
 }
 
 /**
+ * Crash-safe JSON write: temp file + fsync + rename, so a reader (or a restart) never sees a half-written file.
+ * Shared by the bot state, the rebalance status file and the paper-trading ledger.
+ */
+export function writeJsonAtomic(file, obj) {
+  const dir = path.dirname(file);
+
+  if (dir && dir !== '.') {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const tmpFile = `${file}.tmp-${process.pid}-${Date.now()}`;
+  const fd = fs.openSync(tmpFile, 'w');
+  try {
+    fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  fs.renameSync(tmpFile, file);
+
+  if (dir && dir !== '.') {
+    try {
+      const dirFd = fs.openSync(dir, 'r');
+      try {
+        fs.fsyncSync(dirFd);
+      } finally {
+        fs.closeSync(dirFd);
+      }
+    } catch {
+      // Directory fsync is best-effort on Windows.
+    }
+  }
+}
+
+/**
  * Save bot state to disk
  * @param {Object} state - State object to save
  */
 export function saveState(state) {
   try {
-    const stateFile = getStateFilePath();
-    const stateDir = path.dirname(stateFile);
-
-    if (stateDir && stateDir !== '.') {
-      fs.mkdirSync(stateDir, { recursive: true });
-    }
-
-    const tmpFile = `${stateFile}.tmp-${process.pid}-${Date.now()}`;
-    const data = JSON.stringify(state, null, 2);
-    const fd = fs.openSync(tmpFile, 'w');
-    try {
-      fs.writeFileSync(fd, data, 'utf8');
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-
-    fs.renameSync(tmpFile, stateFile);
-
-    if (stateDir && stateDir !== '.') {
-      try {
-        const dirFd = fs.openSync(stateDir, 'r');
-        try {
-          fs.fsyncSync(dirFd);
-        } finally {
-          fs.closeSync(dirFd);
-        }
-      } catch {
-        // Directory fsync is best-effort on Windows.
-      }
-    }
+    writeJsonAtomic(getStateFilePath(), state);
   } catch (error) {
     console.error('[State] Error saving state:', error.message);
     throw error;

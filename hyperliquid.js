@@ -156,13 +156,16 @@ class HyperliquidConnector extends EventEmitter {
 
         this.ws.on('error', (error) => {
           console.error('[Hyperliquid] WebSocket error:', error.message);
-          this.emit('error', error);
+          // EventEmitter throws on an 'error' nobody listens to: a DNS failure or reset would kill the process
+          // instead of letting the close handler reconnect / fall back to REST.
+          if (this.listenerCount('error') > 0) this.emit('error', error);
         });
 
         this.ws.on('close', () => {
           console.log('[Hyperliquid] WebSocket closed');
           this.connected = false;
-          this.stopHealthMonitoring();
+          this.stopHealthMonitoring();  // also clears connectionTimeout, so settle connect() here
+          reject(new Error('WebSocket closed before opening'));  // no-op once open; else a failed attempt hangs forever
 
           this.emit('disconnected');
 
@@ -729,6 +732,7 @@ class HyperliquidConnector extends EventEmitter {
    */
   startHealthMonitoring() {
     this.stopHealthMonitoring();
+    this.lastPongReceived = Date.now();  // new socket: a pong from before an outage must not kill it (reconnect loop)
 
     this.pingTimer = setInterval(() => {
       if (!this.connected || !this.ws) {
@@ -1628,7 +1632,18 @@ class HyperliquidConnector extends EventEmitter {
         requestBody.startTime = startTime;
       }
 
-      const data = await this.infoRequest(requestBody, 20);
+      // At most 500 rows per call (~20 days of one position): page forward from the latest time seen. That time is
+      // asked for again (coins funded in the same hour can straddle the page boundary) and duplicates are skipped.
+      const data = [];
+      const seen = new Set();
+      for (;;) {
+        const page = await this.infoRequest(requestBody, 20);
+        const fresh = page.filter(p => !seen.has(`${p.time}:${p.delta?.coin}`));
+        fresh.forEach(p => seen.add(`${p.time}:${p.delta?.coin}`));
+        data.push(...fresh);
+        if (page.length < 500 || fresh.length === 0) break;
+        requestBody.startTime = Math.max(...page.map(p => p.time));
+      }
 
       // Data format: array of payment objects
       // Each payment: { time, hash, delta: { type: "funding", coin, fundingRate, szi, usdc, nSamples } }

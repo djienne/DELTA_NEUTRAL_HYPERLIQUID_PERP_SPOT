@@ -1,5 +1,5 @@
 import HyperliquidConnector from './hyperliquid.js';
-import { loadState, saveState, hasPosition, getCurrentPosition, recordPosition, closePosition as closePositionState, updateCheckTime, canClosePosition, getPositionAge, formatPosition, getHistoryStats, setPendingIntent, clearPendingIntent } from './utils/state.js';
+import { loadState, saveState, hasPosition, getCurrentPosition, recordPosition, closePosition as closePositionState, updateCheckTime, canClosePosition, getPositionAge, formatPosition, getHistoryStats, setPendingIntent, clearPendingIntent, getStateFilePath, writeJsonAtomic } from './utils/state.js';
 import { checkAndReportBalances } from './utils/balance.js';
 import { findBestOpportunities } from './utils/opportunity.js';
 import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral } from './utils/positions.js';
@@ -11,7 +11,9 @@ import { get24HourVolumes } from './utils/volume.js';
 import { getPerpSpotSpreads } from './utils/arbitrage.js';
 import { getManagedPerpSymbols, getManagedSpotSymbols, getMaxHedgeMismatchPercent, getStartupCleanupMode } from './utils/risk.js';
 import { getCurrentPositionFundingSignal, switchEdge } from './utils/position-decision.js';
+import { PaperConnector } from './utils/paper-exchange.js';
 import fs from 'fs';
+import path from 'path';
 import { pathToFileURL } from 'url';
 
 /**
@@ -72,6 +74,13 @@ async function retryWithExponentialBackoff(fn, options = {}) {
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
 HyperliquidConnector.configureSymbolMapping(config.symbolMapping || {});
 
+// PAPER_TRADING=1: same bot, simulated account (utils/paper-exchange.js). Paper state always lives in ./data-paper/,
+// whatever BOT_STATE_FILE says (e.g. the live service's), so paper can never write into the live state.
+const PAPER = process.env.PAPER_TRADING === '1';
+if (PAPER) {
+  process.env.BOT_STATE_FILE = './data-paper/bot-state.json';
+}
+
 // Bot parameters
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;  // 1 hour
 const MIN_HOLD_TIME_MS = process.env.MIN_HOLD_TIME_MS
@@ -79,6 +88,9 @@ const MIN_HOLD_TIME_MS = process.env.MIN_HOLD_TIME_MS
   : (config.bot?.minHoldTimeDays ?? 7) * 24 * 60 * 60 * 1000;  // Default: 7 days (= 7d funding window)
 const STATS_LOG_INTERVAL = 6;  // Log statistics every N cycles (6 cycles = 6 hours)
 const STATUS_DISPLAY_INTERVAL_MS = 2 * 60 * 1000;  // 2 minutes
+// Before opening, the free USDC split must satisfy |PERP - SPOT| / (PERP + SPOT) <= this (10 = 50/50 +-5 points).
+// Otherwise the bot is ON HOLD and asks for a manual transfer (an API key cannot move funds). Derivation: config notes.rebalance.
+const MAX_BALANCE_IMBALANCE_PERCENT = config.bot?.maxBalanceImbalancePercent ?? 10;
 
 // Global state
 let state = null;
@@ -89,6 +101,7 @@ let cycleInterval = null;
 let statusInterval = null;
 let activeCyclePromise = null;
 let shutdownRequested = false;
+let rebalanceHold = null;  // { since } while ON HOLD waiting for a manual PERP<->SPOT transfer
 
 function timestamp() {
   return `[${new Date().toLocaleTimeString()}]`;
@@ -126,7 +139,7 @@ function bidAskFromL2Book(coin, l2Book) {
  */
 async function initialize() {
   console.log('='.repeat(80));
-  console.log('Delta-Neutral Trading Bot');
+  console.log(PAPER ? 'Delta-Neutral Trading Bot - PAPER TRADING (simulated account, live market data)' : 'Delta-Neutral Trading Bot');
   console.log('='.repeat(80));
   console.log();
 
@@ -147,7 +160,7 @@ async function initialize() {
   }
 
   // Initialize Hyperliquid connector
-  hyperliquid = new HyperliquidConnector({ testnet: false });
+  hyperliquid = PAPER ? new PaperConnector(config) : new HyperliquidConnector({ testnet: false });
 
   if (!hyperliquid.wallet) {
     console.error('❌ Error: Wallet address not configured');
@@ -505,10 +518,62 @@ async function runCycle() {
 }
 
 /**
+ * Check the free PERP/SPOT USDC split. If it is off by more than MAX_BALANCE_IMBALANCE_PERCENT, the bot is ON HOLD
+ * (no trade, no exposure) until the user moves USDC by hand. The verdict is written to rebalance-status.json next to
+ * the state file, so "is a rebalance needed?" can be answered without reading logs.
+ * @returns {Promise<Object>} balance report (utils/balance.js) plus `onHold`
+ */
+async function checkRebalance() {
+  const report = await checkAndReportBalances(hyperliquid, MAX_BALANCE_IMBALANCE_PERCENT / 2);
+  const { perpBalance, spotBalance, totalBalance } = report.balances;
+  const transfer = report.transferSuggestion;
+  const onHold = !report.balanceCheck.isBalanced && totalBalance > 0;
+  rebalanceHold = onHold ? (rebalanceHold || { since: new Date().toISOString() }) : null;
+
+  const action = onHold
+    ? `Transfer ${transfer.amount.toFixed(2)} USDC from ${transfer.fromPerpToSpot ? 'PERP to SPOT' : 'SPOT to PERP'} ` +
+      `(Hyperliquid UI, account ${hyperliquid.wallet})`
+    : 'none';
+  const statusFile = path.join(path.dirname(getStateFilePath()), 'rebalance-status.json');
+  try {
+    writeJsonAtomic(statusFile, {
+      rebalanceNeeded: onHold,
+      status: onHold ? 'ACTION_REQUIRED' : 'OK',
+      action,
+      bot: onHold ? 'ON HOLD: no trades, no exposure until the transfer arrives' : 'balanced, trading normally',
+      direction: onHold ? (transfer.fromPerpToSpot ? 'PERP_TO_SPOT' : 'SPOT_TO_PERP') : null,
+      amountUSDC: onHold ? Number(transfer.amount.toFixed(2)) : 0,
+      perpUSDC: Number(perpBalance.toFixed(2)),
+      spotUSDC: Number(spotBalance.toFixed(2)),
+      imbalancePercent: totalBalance > 0 ? Number((Math.abs(perpBalance - spotBalance) / totalBalance * 100).toFixed(1)) : 0,
+      maxImbalancePercent: MAX_BALANCE_IMBALANCE_PERCENT,
+      since: rebalanceHold?.since ?? null,
+      updated: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error(`${timestamp()} [Bot] Could not write ${statusFile}: ${error.message}`);
+  }
+
+  if (onHold) {
+    console.log('!'.repeat(80));
+    console.log(`${timestamp()} ⚠️  ACTION REQUIRED, bot ON HOLD: ${action}`);
+    console.log(`   PERP $${perpBalance.toFixed(2)} | SPOT $${spotBalance.toFixed(2)}: split is off by more than ` +
+      `${MAX_BALANCE_IMBALANCE_PERCENT}%. No trades and no exposure until the funds arrive; resumes automatically.`);
+    console.log('!'.repeat(80));
+  }
+  return { ...report, onHold };
+}
+
+/**
  * Open a delta-neutral position behind a crash-safe pending intent. The intent is cleared on failure
  * unless exposure may exist on-chain, which the next start (reconcilePendingIntent) then resolves.
  */
 async function openPosition(opportunity, reason) {
+  const balanceReport = await checkRebalance();
+  if (balanceReport.onHold) {
+    return;
+  }
+
   console.log(`${timestamp()} [4/6] Opening Delta-Neutral Position for ${opportunity.symbol} (${reason})...`);
   state = setPendingIntent(state, {
     type: 'opening',
@@ -520,7 +585,6 @@ async function openPosition(opportunity, reason) {
   saveState(state);
 
   try {
-    const balanceReport = await checkAndReportBalances(hyperliquid, 10);
     console.log(balanceReport.report);
     const result = await openDeltaNeutralPosition(hyperliquid, opportunity, balanceReport.balances, config, { verbose: true });
     if (result.success) {
@@ -586,8 +650,16 @@ async function displayStatus() {
   };
 
   console.log(colors.dim + '─'.repeat(80) + colors.reset);
-  console.log(`${colors.bright}${colors.cyan}📊 Bot Status${colors.reset} - ${colors.dim}${now.toLocaleString()}${colors.reset}`);
+  console.log(`${colors.bright}${colors.cyan}📊 Bot Status${PAPER ? ' [PAPER TRADING]' : ''}${colors.reset} - ${colors.dim}${now.toLocaleString()}${colors.reset}`);
   console.log(colors.dim + '─'.repeat(80) + colors.reset);
+
+  // ON HOLD: re-check every status tick so the bot resumes within ~2 minutes of the manual transfer landing
+  if (rebalanceHold && !isRunning) {
+    if (!(await checkRebalance()).onHold) {
+      console.log(`${timestamp()} ✅ Transfer received, PERP/SPOT balanced: resuming now`);
+      await runGuardedCycle();
+    }
+  }
 
   if (hasPosition(state)) {
     const position = getCurrentPosition(state);
@@ -651,13 +723,13 @@ async function displayStatus() {
     console.log();
 
     if (canClose) {
-      console.log(`${colors.green}✅ Can Rebalance: YES${colors.reset} ${colors.dim}(held > ${minHoldDays} days)${colors.reset}`);
+      console.log(`${colors.green}✅ Can Switch/Close: YES${colors.reset} ${colors.dim}(held > ${minHoldDays} days)${colors.reset}`);
       console.log(`   ${colors.dim}Switches only if the expected funding gain beats fees + spread${colors.reset}`);
     } else {
       if (daysUntilCanClose >= 1) {
-        console.log(`${colors.yellow}⏳ Can Rebalance: NO${colors.reset} ${colors.dim}(need ${daysUntilCanClose.toFixed(2)} more days)${colors.reset}`);
+        console.log(`${colors.yellow}⏳ Can Switch/Close: NO${colors.reset} ${colors.dim}(need ${daysUntilCanClose.toFixed(2)} more days)${colors.reset}`);
       } else {
-        console.log(`${colors.yellow}⏳ Can Rebalance: NO${colors.reset} ${colors.dim}(need ${hoursUntilCanClose.toFixed(1)} more hours)${colors.reset}`);
+        console.log(`${colors.yellow}⏳ Can Switch/Close: NO${colors.reset} ${colors.dim}(need ${hoursUntilCanClose.toFixed(1)} more hours)${colors.reset}`);
       }
       console.log(`   ${colors.dim}Min hold: ${minHoldDays} days${colors.reset}`);
       console.log(`   ${colors.dim}Can close at: ${new Date(position.openTime + MIN_HOLD_TIME_MS).toLocaleString()}${colors.reset}`);

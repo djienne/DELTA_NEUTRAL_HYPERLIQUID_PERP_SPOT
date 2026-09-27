@@ -30,6 +30,10 @@ node tests/check-spot-perp-balances.js       # PERP/SPOT USDC split
 node tests/hedge-positions.js --analyze      # imbalance report (--execute places orders)
 
 MIN_HOLD_TIME_MS=300000 node bot.js          # override min hold (testing)
+
+PAPER_TRADING=1 node bot.js                  # paper trading: simulated account, live market data (./data-paper/)
+docker compose --profile paper up -d paper-bot   # same, persistent container
+python paper_stats.py                        # paper results: PnL decomposition, per pair, switches, drawdown
 ```
 
 Scripts that can place orders (`test-perp-short`, `test-spot-market-orders`, `test-spot-perp-transfer`,
@@ -46,9 +50,15 @@ Never run them from an agent session.
 - `utils/trade.js`: open/close with parallel PERP+SPOT orders, fill verification, cleanup of orphan legs.
 - `utils/positions.js`: on-chain PERP positions / SPOT balances (dust below `MIN_NOTIONAL_USD` = $10 is ignored everywhere).
 - `utils/hedge.js`: detect and fix imbalanced exposure (used at startup and after failed trades).
-- `utils/state.js`: persistent state (`BOT_STATE_FILE`, default `./bot-state.json`; Docker uses `./data/`), including a
+- `utils/state.js`: persistent state (`BOT_STATE_FILE`, default `./bot-state.json`; Docker uses `./data/`; paper is always
+  `./data-paper/`), including a
   `pendingIntent` written before every trade so a crash mid-trade is reconciled on restart.
 - `utils/risk.js`: config accessors (fees, fill ratio, mismatch limits, managed symbols, startup cleanup mode).
+- `utils/paper-exchange.js`: `PaperConnector extends HyperliquidConnector` for `PAPER_TRADING=1`. Signed requests
+  (`fetchJsonWithTimeout(exchangeUrl)`) are answered by a simulated account (exchange-style order checks, book-walk
+  IOC fills, fees, isolated margin + liquidation, hourly funding replayed after outages, a simulated human who makes
+  the transfer asked in `rebalance-status.json`, landing after 1 h); user info queries are served from its ledger,
+  anything else is live public data. Header documents every mechanic and assumption.
 - Market data: `funding.js` (current + 7d history), `volume.js` (`dayNtlVlm`, already USD), `spread.js`, `arbitrage.js`.
 
 ## Decision Flow
@@ -64,6 +74,9 @@ Hourly cycle, holding position A:
   close    else if switchEdge(A, null) > 0          (negative A whose expected loss beats closing cost)
   hold     otherwise
   Acting requires age >= minHoldTimeDays, unless A's 7d average is negative.
+
+Before any open: free USDC split outside 50/50 ± bot.maxBalanceImbalancePercent/2 → ON HOLD (no trade, no exposure),
+  ACTION_REQUIRED banner + <state dir>/rebalance-status.json; displayStatus re-checks every 2 min and resumes.
 
 Hourly cycle, flat:
   filters: bid-ask spread <= 0.15%, PERP-SPOT basis <= 0.5%, 24h volume >= $75M, 7d avg funding >= 5% APY
@@ -112,6 +125,8 @@ cost = 2 × (perp fee + spot fee) + candidate perp + spot spread      (close-onl
 | `trading.maxSlippagePercent` | 5 (percent) |
 | `trading.takerFeeRate` / `spotTakerFeeRate` | 0.00045 / 0.0007 per leg, used by `switchEdge` and fee fallback |
 | `bot.minHoldTimeDays` / `bot.switchHorizonDays` | 7 / 8 (see above) |
+| `bot.maxBalanceImbalancePercent` | 10: hold for a manual transfer when \|PERP − SPOT\| > 10% of free USDC (derivation in `notes.rebalance`) |
+| `paper.*` | paper account start USDC per side, simulated transfer delay (paper only) |
 | `thresholds.*` | entry filters: volume, bid-ask spread, basis, minimum funding APY |
 | `risk.*` | fill ratio, hedge mismatch limits, `startupCleanupMode`, optional `managedSpotSymbols` |
 | `rateLimit.*` | concurrency and batch delay for market-data fetches only |
@@ -130,11 +145,18 @@ sub-account/vault: info queries use `wallet_address`, and every signed action (o
   `getCoinForOrderbook(spotSymbol, await getAssetId(spotSymbol, true))`. PURR uses `PURR/USDC`.
 - `asset.coin` in clearinghouse state is a name string, not an index.
 - Info request weights: 2 for `l2Book`, `allMids` and `clearinghouseState`; 20 for most others.
+- `userFunding` and `fundingHistory` return at most 500 rows (≈20 days of one position): page with
+  `startTime = last.time + 1` (`getUserFundingHistory`). `candleSnapshot` returns at most 5000 candles.
+- An API (agent) wallet cannot `usdClassTransfer`: PERP↔SPOT moves need the account's own key (see Development Guidelines).
 
 ## Development Guidelines
 
-- **No dry-run or simulation mode** for trading functions. Anything that creates orders places real orders.
+- **No dry-run branches** in trading functions: anything that creates orders places real orders through the connector.
+  Paper trading exists only as a swapped connector (`PAPER_TRADING=1` → `PaperConnector`), so the paper bot runs the
+  exact live code; keep it that way (no `if (paper)` in bot/trade/hedge logic beyond the connector choice and banners).
   Analysis-only functions (e.g. `analyzeHedgeNeeds`) are fine.
+- **PERP↔SPOT transfers are manual** (the API key cannot transfer; the user will never put the wallet key in a file).
+  Never automate them; the bot holds and asks (`rebalance-status.json`).
 - Validate market data before use: bid, ask and mid present with mid > 0, and results `Number.isFinite`. Missing volume
   or funding is `null`, so the pair is rejected, never counted as 0.
 - Tables reserve a sign column: `n >= 0 ? ' ' + n.toFixed(d) : n.toFixed(d)`.

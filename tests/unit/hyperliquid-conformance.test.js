@@ -9,6 +9,8 @@ import { updateLeverage } from '../../utils/leverage.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
+import { spawnSync } from 'node:child_process';
 
 class FakeWebSocket extends EventEmitter {
   constructor() {
@@ -375,4 +377,48 @@ test('roundPrice avoids exponential notation', () => {
   const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
 
   assert.equal(connector.roundPrice(0.000012345, 2, true).includes('e'), false);
+});
+
+test('getUserFundingHistory pages past the 500-row API cap without losing rows that share an hour', async () => {
+  const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
+  // 499 HYPE hours, then two coins funded in the same hour: the 500-row page boundary falls between them
+  const rows = [...Array.from({ length: 499 }, (_, i) => ({ time: 1000 + i, coin: 'HYPE' })),
+    { time: 1499, coin: 'HYPE' }, { time: 1499, coin: 'PURR' }, { time: 1500, coin: 'HYPE' }]
+    .map(r => ({ time: r.time, delta: { type: 'funding', coin: r.coin, usdc: '0.01' } }));
+  connector.infoRequest = async ({ startTime }) => rows.filter(r => r.time >= startTime).slice(0, 500);  // API paging
+
+  const history = await connector.getUserFundingHistory(null, 1000);
+
+  assert.equal(history.count, 502);
+  assert.ok(Math.abs(history.totalAccumulated - 5.02) < 1e-9);
+});
+
+test('network outage: a failed WebSocket connect rejects promptly and does not crash the process', async () => {
+  const server = net.createServer();
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  await new Promise(resolve => server.close(resolve));  // nothing listens there any more: connection refused
+
+  // Child process: exit 0 when connect() rejects. An unlistened 'error' crashes it (exit 1); a promise that never
+  // settles (reconnect stuck at attempt 1, startup hanging instead of exiting for Docker to restart) times out (exit 3).
+  const script = `const { default: C } = await import(${JSON.stringify(new URL('../../hyperliquid.js', import.meta.url).href)});
+    const c = new C({ wallet: null, privateKey: null });
+    c.wsUrl = 'ws://127.0.0.1:${port}';
+    c.connect().then(() => process.exit(4), () => process.exit(0));
+    setTimeout(() => process.exit(3), 15000);`;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 20000 });
+  assert.match(run.stderr, /WebSocket error/);
+  assert.equal(run.status, 0, run.stderr);
+});
+
+test('after an outage the reconnected socket is not killed by the pong clock of the old one', async () => {
+  const c = new HyperliquidConnector({ wallet: null, privateKey: null, pingInterval: 20, pongTimeout: 1000 });
+  let terminated = false;
+  c.connected = true;
+  c.ws = { send: () => {}, terminate: () => { terminated = true; } };
+  c.lastPongReceived = Date.now() - 5 * 60000;  // last pong before a 5-minute outage
+  c.startHealthMonitoring();                    // what the 'open' handler of the new socket does
+  await new Promise(resolve => setTimeout(resolve, 60));
+  c.stopHealthMonitoring();
+  assert.equal(terminated, false);
 });

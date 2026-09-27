@@ -35,6 +35,29 @@ services:
       retries: 3
       start_period: 10s
 
+  # Paper trading: same bot and code, simulated account (utils/paper-exchange.js) on live market data.
+  # Not started by plain `docker compose up -d`; start it with:
+  #   docker compose --profile paper up -d paper-bot
+  # Stats: python paper_stats.py   |   Reset: docker compose stop paper-bot, delete ./data-paper/, start again
+  paper-bot:
+    build: .
+    profiles: [paper]
+    container_name: hyperliquid-paper-bot
+    # Network outages are ridden out in-process; this restarts it if the process dies and, with Docker Desktop set to
+    # start at sign-in, after PC restarts
+    restart: unless-stopped
+    environment:
+      PAPER_TRADING: "1"  # state always in /app/data-paper (bot.js)
+    # No credentials on purpose: the paper account signs with a throwaway key and never reaches /exchange
+    volumes:
+      - ./data-paper:/app/data-paper
+      - ./config.json:/app/config.json:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 # Optional: Add a network for future expansion (e.g., monitoring)
 networks:
   default:

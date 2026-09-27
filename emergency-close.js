@@ -16,6 +16,13 @@ import fs from 'fs';
  * Usage: node emergency-close.js
  */
 
+if (process.env.PAPER_TRADING === '1') {
+  // This script always trades the LIVE account from hyperliquid.env; paper positions live in the simulated ledger.
+  console.error('emergency-close.js closes the LIVE account and is not available in paper mode.');
+  console.error('To reset the paper run instead: stop the paper bot and delete ./data-paper/');
+  process.exit(2);
+}
+
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
 HyperliquidConnector.configureSymbolMapping(config.symbolMapping || {});
 

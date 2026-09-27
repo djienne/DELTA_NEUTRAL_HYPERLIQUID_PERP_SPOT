@@ -28,7 +28,8 @@
   },
   "bot": {
     "minHoldTimeDays": 7,
-    "switchHorizonDays": 8
+    "switchHorizonDays": 8,
+    "maxBalanceImbalancePercent": 10
   },
   "symbolMapping": {
     "perpToSpot": {
@@ -68,6 +69,13 @@
     "orderSizes": "Minimum order sizes per symbol defined in minOrderSizeUSD - positions will not open if insufficient capital",
     "slippage": "Maximum 5% slippage for market orders",
     "leverage": "Always uses 1x leverage (set per-pair before opening positions)",
-    "bot": "minHoldTimeDays: days before a non-emergency switch (default 7 = the 7d funding window). switchHorizonDays: effective days a 7d-avg funding gap is earned (default 8, measured; re-estimate with tests/check-switch-calibration.js). A switch happens only when gap x horizon beats fees + spread."
+    "bot": "minHoldTimeDays: days before a non-emergency switch (default 7 = the 7d funding window). switchHorizonDays: effective days a 7d-avg funding gap is earned (default 8, measured; re-estimate with tests/check-switch-calibration.js). A switch happens only when gap x horizon beats fees + spread.",
+    "rebalance": "maxBalanceImbalancePercent: before opening, |PERP - SPOT| / (PERP + SPOT) x 100 of free USDC must be <= this (10 = 50/50 +-5 points), else the bot is ON HOLD (no trade, no exposure) and rebalance-status.json (next to the state file) says ACTION_REQUIRED with the exact manual transfer. Rule of thumb: rebalance when imbalance > D/H, D = your response time, H = mean holding time (~25 days): 2% for D=12h, 10% for D~2.5 days.",
+    "paper": "Paper trading only (PAPER_TRADING=1): starting USDC per account and the simulated delay of the manual PERP<->SPOT transfer. Ignored by the live bot."
+  },
+  "paper": {
+    "startPerpUSDC": 500,
+    "startSpotUSDC": 500,
+    "transferDelayMinutes": 60
   }
 }

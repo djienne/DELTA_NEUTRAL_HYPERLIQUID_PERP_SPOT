@@ -57,9 +57,10 @@ export async function getBalances(hyperliquid, user = null) {
 }
 
 /**
- * Check if balances are within acceptable range (50% ±10%)
+ * Check if the PERP/SPOT split is within 50% ± tolerance points
  * @param {Object} balances - Balance information from getBalances
- * @param {number} tolerance - Tolerance percentage (default 10%)
+ * @param {number} tolerance - Allowed distance from 50%, in percentage points (default 10 = 40/60). The bot passes
+ *   bot.maxBalanceImbalancePercent / 2 (default 5 = 45/55) and holds new positions outside it.
  * @returns {Object} Balance check result
  */
 export function checkBalanceDistribution(balances, tolerance = 10) {
@@ -142,9 +143,9 @@ export function formatBalanceReport(balances, balanceCheck, transferSuggestion) 
   lines.push('');
 
   if (balanceCheck.isBalanced) {
-    lines.push(`✅ Balanced (within ${balanceCheck.tolerance}% tolerance)`);
+    lines.push(`✅ Balanced (${balanceCheck.target}% ±${balanceCheck.tolerance} points)`);
   } else {
-    lines.push(`⚠️  Imbalanced (target: ${balanceCheck.target}% ±${balanceCheck.tolerance}%)`);
+    lines.push(`⚠️  Imbalanced (target: ${balanceCheck.target}% ±${balanceCheck.tolerance} points)`);
     lines.push(`  PERP: ${balanceCheck.perpImbalance > 0 ? '+' : ''}${balanceCheck.perpImbalance.toFixed(1)}% from target`);
     lines.push(`  SPOT: ${balanceCheck.spotImbalance > 0 ? '+' : ''}${balanceCheck.spotImbalance.toFixed(1)}% from target`);
 
@@ -154,7 +155,7 @@ export function formatBalanceReport(balances, balanceCheck, transferSuggestion) 
       lines.push(`  Direction: ${transferSuggestion.direction}`);
       lines.push(`  Amount: $${transferSuggestion.amount.toFixed(2)}`);
       lines.push('');
-      lines.push('  Note: Bot will proceed with current balance distribution.');
+      lines.push('  Do it by hand in the Hyperliquid UI (the API key cannot transfer). The bot opens nothing until then.');
     }
   }
 
@@ -164,7 +165,8 @@ export function formatBalanceReport(balances, balanceCheck, transferSuggestion) 
 /**
  * Check balances and generate full report
  * @param {HyperliquidConnector} hyperliquid - Hyperliquid connector
- * @param {number} tolerance - Tolerance percentage (default 10%)
+ * @param {number} tolerance - Allowed distance from 50%, in percentage points (default 10 = 40/60). The bot passes
+ *   bot.maxBalanceImbalancePercent / 2 (default 5 = 45/55) and holds new positions outside it.
  * @returns {Promise<Object>} Full balance report
  */
 export async function checkAndReportBalances(hyperliquid, tolerance = 10) {

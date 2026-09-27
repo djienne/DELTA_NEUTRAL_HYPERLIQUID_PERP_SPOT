@@ -14,7 +14,7 @@ async function test() {
 
   // Test balance check
   console.log('[1/2] Checking Balance Distribution...');
-  const balanceReport = await checkAndReportBalances(hyperliquid, 10);
+  const balanceReport = await checkAndReportBalances(hyperliquid, (config.bot?.maxBalanceImbalancePercent ?? 10) / 2);  // same hold rule as bot.js
   console.log(balanceReport.report);
   console.log();
 
