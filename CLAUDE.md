@@ -32,7 +32,7 @@ node tests/hedge-positions.js --analyze      # imbalance report (--execute place
 MIN_HOLD_TIME_MS=300000 node bot.js          # override min hold (testing)
 
 PAPER_TRADING=1 node bot.js                  # paper trading: simulated account, live market data (./data-paper/)
-docker compose --profile paper up -d paper-bot   # same, persistent container
+docker compose -f docker-compose.paper.yml up -d --build   # same, persistent container (own project; fleet start_all starts only this)
 python paper_stats.py                        # paper results: PnL decomposition, per pair, switches, drawdown
 ```
 

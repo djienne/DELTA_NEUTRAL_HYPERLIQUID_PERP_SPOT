@@ -17,6 +17,11 @@ class HyperliquidConnector extends EventEmitter {
     this.restUrl = options.restUrl || 'https://api.hyperliquid.xyz/info';
     this.exchangeUrl = options.exchangeUrl || 'https://api.hyperliquid.xyz/exchange';
     this.testnet = options.testnet || false;
+    this.marketDataHub = this.testnet ? '' : (options.marketDataHub ?? process.env.HL_PUBLIC_HTTP ?? '');
+    if (this.marketDataHub) {
+      this.marketDataHub = this.marketDataHub.replace(/\/$/, '');
+      this.wsUrl = this.marketDataHub.replace(/^http/, 'ws') + '/ws?consumer=delta-neutral';
+    }
 
     if (this.testnet) {
       this.wsUrl = 'wss://api.hyperliquid-testnet.xyz/ws';
@@ -316,6 +321,10 @@ class HyperliquidConnector extends EventEmitter {
   }
 
   async infoRequest(payload, weight = 2) {
+    if (this.marketDataHub && payload.type === 'l2Book') {
+      const query = new URLSearchParams(Object.entries(payload).filter(([key]) => key !== 'type'));
+      return await this.fetchJsonWithTimeout(`${this.marketDataHub}/book?${query}`, { method: 'GET' });
+    }
     await this.restRateLimiter.waitForSlot(weight);
 
     return await this.fetchJsonWithTimeout(this.restUrl, {
@@ -509,6 +518,7 @@ class HyperliquidConnector extends EventEmitter {
    * Request L2 orderbook via WebSocket post
    */
   async requestL2Book(coin, options = {}) {
+    if (this.marketDataHub) return await this.requestL2BookRest(coin, options);
     // Check inflight request limit
     if (this.pendingRequests.size >= this.maxInflightRequests) {
       throw new Error('Too many inflight requests');
@@ -1479,7 +1489,7 @@ class HyperliquidConnector extends EventEmitter {
     };
 
     // Try WebSocket first if connected, otherwise use REST
-    if (this.connected && !options.useRest) {
+    if (this.connected && !options.useRest && !this.marketDataHub) {
       return await this.createOrderWebSocket(action, nonce, options.vaultAddress ?? this.vaultAddress, options.expiresAfter, orderContext);
     } else {
       return await this.createOrderRest(action, nonce, options.vaultAddress ?? this.vaultAddress, options.expiresAfter, orderContext);

@@ -12,6 +12,22 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 
+test('central market data preserves full-precision requests and never falls back upstream', async () => {
+  const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null, marketDataHub: 'http://hub:8766' });
+  const calls = [];
+  connector.fetchJsonWithTimeout = async (url, options) => {
+    calls.push({ url, options });
+    return { coin: 'BTC', time: 123, levels: [[], []] };
+  };
+  await connector.requestL2Book('BTC', { nSigFigs: null });
+  assert.equal(calls[0].url, 'http://hub:8766/book?coin=BTC');
+  assert.equal(calls[0].options.method, 'GET');
+  assert.equal(connector.wsUrl, 'ws://hub:8766/ws?consumer=delta-neutral');
+  assert.equal(connector.exchangeUrl, 'https://api.hyperliquid.xyz/exchange');
+  connector.fetchJsonWithTimeout = async () => { throw new Error('hub down'); };
+  await assert.rejects(connector.requestL2BookRest('BTC'), /hub down/);
+});
+
 class FakeWebSocket extends EventEmitter {
   constructor() {
     super();

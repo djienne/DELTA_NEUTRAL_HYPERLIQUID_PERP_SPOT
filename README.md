@@ -137,11 +137,13 @@ node tests/check-switch-calibration.js   # Re-estimate switch parameters from pu
 The **same bot code** runs unchanged against a **simulated account**, on **live** Hyperliquid market data. Nothing is sent to the exchange and no credentials are used (the container gets no `hyperliquid.env`; orders are signed with a throwaway key and answered by `utils/paper-exchange.js`).
 
 ```bash
-docker compose --profile paper up -d paper-bot   # start in the background (restarts by itself)
-docker compose logs -f paper-bot                 # watch
-python paper_stats.py                            # results (--plot saves data-paper/paper-equity.png)
-docker compose stop paper-bot                    # pause; the run continues where it was on the next start
+docker compose -f docker-compose.paper.yml up -d --build   # start in the background (restarts by itself)
+docker compose -f docker-compose.paper.yml logs -f         # watch
+python paper_stats.py                                      # results (--plot saves data-paper/paper-equity.png)
+docker compose -f docker-compose.paper.yml stop            # pause; the run continues where it was on the next start
 ```
+
+The paper bot has its own compose file and project (`delta-neutral-paper`), apart from the live bot in `docker-compose.yml`, so a plain `docker compose up -d` in this folder starts the **live** bot, never the paper one. The workspace's `start_all.bat` / `restart_all.bat` start only the paper bot, through the line `DELTA_NEUTRAL\DELTA_NEUTRAL_HYPERLIQUID_PERP_SPOT|docker-compose.paper.yml` in `..\..\folder_list.txt`; keep the `|docker-compose.paper.yml` part, or they would start live trading.
 
 - **Reset**: stop it, delete `./data-paper/`, start again: a new $1,000 account (500 PERP / 500 SPOT, `config.json` → `paper`).
 - **Without Docker**: `PAPER_TRADING=1 node bot.js` (PowerShell: `$env:PAPER_TRADING=1; node bot.js`, and the variable stays set in that window). State always goes to `./data-paper/`, whatever `BOT_STATE_FILE` says, so paper can never write into the live state.

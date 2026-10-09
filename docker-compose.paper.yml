@@ -1,0 +1,35 @@
+# Paper trading (dry run): same bot and code, simulated account (utils/paper-exchange.js) on live market data.
+# Its own compose project, apart from the LIVE bot in docker-compose.yml, so the fleet scripts
+# (..\..\folder_list.txt: DELTA_NEUTRAL\DELTA_NEUTRAL_HYPERLIQUID_PERP_SPOT|docker-compose.paper.yml)
+# build / start / stop only this container and never the real-money bot.
+#   docker compose -f docker-compose.paper.yml up -d --build     # start (restarts by itself)
+#   docker compose -f docker-compose.paper.yml logs -f            # watch
+#   docker compose -f docker-compose.paper.yml stop               # pause; the run continues on the next start
+# Stats: python paper_stats.py   |   Reset: stop it, delete ./data-paper/, start again
+name: delta-neutral-paper
+
+services:
+  paper-bot:
+    build: .
+    container_name: hyperliquid-paper-bot
+    # Network outages are ridden out in-process; this restarts it if the process dies and, with Docker Desktop set to
+    # start at sign-in, after PC restarts
+    restart: unless-stopped
+    environment:
+      PAPER_TRADING: "1"  # state always in /app/data-paper (bot.js)
+      HL_PUBLIC_HTTP: http://hyperliquid-data-hub:8766
+    networks: [default, market-data]
+    # No credentials on purpose: the paper account signs with a throwaway key and never reaches /exchange
+    volumes:
+      - ./data-paper:/app/data-paper
+      - ./config.json:/app/config.json:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  market-data:
+    external: true
+    name: hyperliquid-market-data
