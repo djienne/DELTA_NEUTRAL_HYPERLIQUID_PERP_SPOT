@@ -23,11 +23,10 @@ test('seven-day funding validation rejects missing, duplicated, gapped, non-fini
 
 test('funding history errors and empty history never fall back to a negative current hour', async () => {
   for(const outcome of ['timeout','empty','partial','valid']) {
-    const rates=await getFundingRatesWithHistory({infoRequest:async ({type})=>{
-      if(type==='metaAndAssetCtxs')return [{universe:[{name:'BTC'}]},[{funding:'-0.001'}]];
+    const rates=await getFundingRatesWithHistory({infoRequest:async ()=>{
       if(outcome==='timeout')throw Error('history timeout');
       return outcome==='empty'?[]:outcome==='partial'?hours().slice(1):hours();
-    }},['BTC']);
+    }},['BTC'],[{universe:[{name:'BTC'}]},[{funding:'-0.001'}]]);
     const signal=getCurrentPositionFundingSignal({symbol:'BTC'},{rankedOpportunities:[],marketData:{fundingRates:rates}});
     assert.equal(signal.available,outcome==='valid');
     if(signal.available) assert.ok(signal.fundingRate>0);

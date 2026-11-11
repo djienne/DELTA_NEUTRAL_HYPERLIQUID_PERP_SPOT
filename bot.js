@@ -3,11 +3,8 @@ import { loadState, saveState, hasPosition, getCurrentPosition, recordPosition, 
 import { getBalances, rebalanceNeeded } from './utils/balance.js';
 import { findBestOpportunities } from './utils/opportunity.js';
 import { openDeltaNeutralPosition, closeDeltaNeutralPosition } from './utils/trade.js';
-import { logStatistics } from './utils/statistics.js';
+import { logStatistics, formatMarketTable } from './utils/statistics.js';
 import { autoHedgeAll, analyzeHedgeNeeds, formatHedgeReport } from './utils/hedge.js';
-import { getFundingRates } from './utils/funding.js';
-import { get24HourVolumes } from './utils/volume.js';
-import { getPerpSpotSpreads } from './utils/arbitrage.js';
 import { getManagedPerpSymbols, getManagedSpotSymbols, getMaxHedgeMismatchPercent, getStartupCleanupMode } from './utils/risk.js';
 import { getCurrentPositionFundingSignal, switchEdge } from './utils/position-decision.js';
 import { PaperConnector } from './utils/paper-exchange.js';
@@ -28,48 +25,6 @@ import { pathToFileURL } from 'url';
  * - Decisions on 7-day average funding; switch only when the expected gain beats fees + spread
  *   (utils/position-decision.js switchEdge), after a minimum hold unless funding is negative
  */
-
-/**
- * Exponential backoff retry for rate limit errors (429)
- * @param {Function} fn - Async function to retry
- * @param {Object} options - Options
- * @returns {Promise} Result of the function
- */
-async function retryWithExponentialBackoff(fn, options = {}) {
-  const {
-    maxRetries = 5,
-    initialDelay = 1000,
-    maxDelay = 30000,
-    onRetry = null
-  } = options;
-
-  let delay = initialDelay;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      // Check if it's a rate limit error (429)
-      const is429 = error.message?.includes('429') ||
-                    error.message?.includes('Too Many Requests') ||
-                    error.message?.includes('rate limit');
-
-      if (!is429 || attempt === maxRetries) {
-        throw error; // Not a rate limit error or out of retries
-      }
-
-      // Calculate next delay with exponential backoff
-      const nextDelay = Math.min(delay * 2, maxDelay);
-
-      if (onRetry) {
-        onRetry(attempt + 1, maxRetries, delay, error);
-      }
-
-      await new Promise(resolve => setTimeout(resolve, delay));
-      delay = nextDelay;
-    }
-  }
-}
 
 // Configuration
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
@@ -102,6 +57,7 @@ let statusInterval = null;
 let activeCyclePromise = null;
 let shutdownRequested = false;
 let rebalanceHold = null;  // { since } while ON HOLD waiting for a manual PERP<->SPOT transfer
+let lastAnalysis = null;   // the last hourly market scan (findBestOpportunities + time), shown by displayStatus
 
 function timestamp() {
   return `[${new Date().toLocaleTimeString()}]`;
@@ -109,33 +65,6 @@ function timestamp() {
 
 function formatKnown(value, decimals = 2) {
   return Number.isFinite(value) ? value.toFixed(decimals) : 'unknown';
-}
-
-function bidAskFromL2Book(coin, l2Book) {
-  const [bids, asks] = l2Book?.levels || [];
-  const bestBid = bids?.[0];
-  const bestAsk = asks?.[0];
-
-  if (!bestBid || !bestAsk) {
-    return null;
-  }
-
-  const bid = parseFloat(bestBid.px);
-  const ask = parseFloat(bestAsk.px);
-
-  if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) {
-    return null;
-  }
-
-  return {
-    coin,
-    bid,
-    ask,
-    mid: (bid + ask) / 2,
-    bidSize: parseFloat(bestBid.sz || '0'),
-    askSize: parseFloat(bestAsk.sz || '0'),
-    timestamp: l2Book.time || Date.now()
-  };
 }
 
 /**
@@ -350,26 +279,6 @@ async function runCycle() {
   console.log('='.repeat(80));
   console.log();
 
-  // Log detailed statistics periodically
-  if (cycleCount % STATS_LOG_INTERVAL === 1 || cycleCount === 1) {
-    console.log(`${timestamp()} [Bot] Logging market statistics...`);
-    try {
-      await retryWithExponentialBackoff(
-        async () => logStatistics(hyperliquid, config.trading.pairs, config, { verbose: false }),
-        {
-          maxRetries: 5,
-          initialDelay: 2000,
-          maxDelay: 30000,
-          onRetry: (attempt, maxRetries, delay) => {
-            console.log(`${timestamp()} [Bot] Rate limit hit while fetching statistics, retrying in ${delay}ms (attempt ${attempt}/${maxRetries})...`);
-          }
-        }
-      );
-    } catch (error) {
-      console.error(`${timestamp()} [Bot] Failed to log statistics:`, error.message);
-    }
-  }
-
   try {
     // Step 1: Check existing position
     if (hasPosition(state)) {
@@ -416,11 +325,7 @@ async function runCycle() {
         console.log(`${timestamp()} [2/6] Can Close: ${canClose ? 'YES' : 'NO'} (min hold: ${MIN_HOLD_TIME_MS / (1000 * 60 * 60 * 24)} days)`);
         console.log();
 
-        console.log(`${timestamp()} [3/6] Checking current opportunities...`);
-        const analysis = await findBestOpportunities(hyperliquid, config.trading.pairs, config, { verbose: true });
-        console.log();
-        console.log(analysis.report);
-        console.log();
+        const analysis = await scanMarkets();
 
         // Cost-aware decision on 7d-average funding (see switchEdge). Only a position with negative
         // funding may be acted on inside the minimum hold.
@@ -469,11 +374,7 @@ async function runCycle() {
     }
 
     // Find best opportunity
-    console.log(`${timestamp()} [3/6] Finding Best Opportunities...`);
-    const analysis = await findBestOpportunities(hyperliquid, config.trading.pairs, config, { verbose: true });
-    console.log();
-    console.log(analysis.report);
-    console.log();
+    const analysis = await scanMarkets();
 
     // No valid opportunities (e.g. all symbols below minFundingRatePercent on 7d average)
     if (!analysis.best) {
@@ -492,6 +393,27 @@ async function runCycle() {
     console.error(`${timestamp()} [Bot] ❌ Error in cycle:`, error.message);
     console.error(error.stack);
   }
+}
+
+/**
+ * The cycle's one market scan. The decision, the statistics (every STATS_LOG_INTERVAL cycles) and the 2-minute
+ * status table all use it.
+ */
+async function scanMarkets() {
+  console.log(`${timestamp()} [3/6] Checking opportunities...`);
+  const analysis = await findBestOpportunities(hyperliquid, config.trading.pairs, config, { verbose: true });
+  lastAnalysis = { ...analysis, time: Date.now() };
+  if (cycleCount % STATS_LOG_INTERVAL === 1) {
+    try {
+      await logStatistics(hyperliquid, analysis.marketData, config.trading.pairs, getCurrentPosition(state)?.symbol);
+    } catch (error) {
+      console.error(`${timestamp()} [Bot] Failed to log statistics:`, error.message);
+    }
+  }
+  console.log();
+  console.log(analysis.report);
+  console.log();
+  return analysis;
 }
 
 /**
@@ -734,157 +656,12 @@ async function displayStatus() {
   console.log(colors.dim + '─'.repeat(80) + colors.reset);
   console.log();
 
-  // Fetch and display market summary
-  try {
-    console.log(`${colors.bright}📈 Market Summary:${colors.reset}`);
+  // Market table of the last hourly scan: refetching it every 2 minutes cost ~125 weight/min for nothing new
+  if (lastAnalysis) {
+    const asOf = new Date(lastAnalysis.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    console.log(`${colors.bright}📈 Markets (7-day funding, as of ${asOf}):${colors.reset}`);
+    console.log(formatMarketTable(lastAnalysis.marketData, config.trading.pairs, getCurrentPosition(state)?.symbol));
     console.log();
-
-    // Fetch current funding rates only (faster, no history to avoid rate limits)
-    // Fetch market data (funding, volumes, perp-spot spreads) with exponential backoff for 429 errors
-    const [fundingData, volumes, perpSpotSpreads] = await retryWithExponentialBackoff(
-      async () => Promise.all([
-        getFundingRates(hyperliquid, config.trading.pairs, { verbose: false }),
-        get24HourVolumes(hyperliquid, config.trading.pairs),
-        getPerpSpotSpreads(hyperliquid, config.trading.pairs, { verbose: false })
-      ]),
-      {
-        maxRetries: 5,
-        initialDelay: 2000,
-        maxDelay: 30000,
-        onRetry: (attempt, maxRetries, delay) => {
-          console.log(colors.yellow + `[Status] Rate limit hit, retrying in ${delay}ms (attempt ${attempt}/${maxRetries})...` + colors.reset);
-        }
-      }
-    );
-
-    // Fetch bid-ask spreads with REST snapshots so status display does not mutate
-    // the trading connector's shared WebSocket subscriptions/orderbook cache.
-    const bidAskSpreads = [];
-    try {
-      for (const symbol of config.trading.pairs) {
-        const spotSymbol = perpToSpot(symbol);
-        const spotAssetId = await hyperliquid.getAssetId(spotSymbol, true);
-        const spotCoin = hyperliquid.getCoinForOrderbook(spotSymbol, spotAssetId);
-
-        const [perpBook, spotBook] = await Promise.all([
-          hyperliquid.requestL2BookRest(symbol),
-          hyperliquid.requestL2BookRest(spotCoin)
-        ]);
-
-        const perpBidAsk = bidAskFromL2Book(symbol, perpBook);
-        const spotBidAsk = bidAskFromL2Book(spotCoin, spotBook);
-
-        if (!perpBidAsk || !spotBidAsk) {
-          continue;
-        }
-
-        let perpSpread = ((perpBidAsk.ask - perpBidAsk.bid) / perpBidAsk.mid) * 100;
-        let spotSpread = ((spotBidAsk.ask - spotBidAsk.bid) / spotBidAsk.mid) * 100;
-
-        if (!Number.isFinite(perpSpread)) perpSpread = null;
-        if (!Number.isFinite(spotSpread)) spotSpread = null;
-
-        bidAskSpreads.push({
-          perpSymbol: symbol,
-          spotSymbol,
-          perpSpreadPercent: perpSpread,
-          spotSpreadPercent: spotSpread
-        });
-      }
-    } catch (error) {
-      // If snapshot fetching fails, just show --- (no spreads)
-      console.error(colors.dim + `[Status] Could not fetch bid-ask spreads: ${error.message}` + colors.reset);
-    }
-
-
-    // Check if we got valid data
-    if (!fundingData || fundingData.length === 0) {
-      console.log(colors.yellow + '⚠️  No funding data available' + colors.reset);
-      console.log();
-      return;
-    }
-
-    // Build maps for quick lookup
-    const volumeMap = new Map(volumes.map(v => [v.perpSymbol, v]));
-    const bidAskMap = new Map(bidAskSpreads.map(s => [s.perpSymbol, s]));
-    const perpSpotMap = new Map(perpSpotSpreads.map(s => [s.perpSymbol, s]));
-
-    // Table header
-    console.log(colors.dim + '┌──────────┬──────────────┬─────────────┬─────────────┬──────────┬──────────┐' + colors.reset);
-    console.log(colors.dim + '│' + colors.reset + ' Symbol   ' + colors.dim + '│' + colors.reset + ' Funding APY  ' + colors.dim + '│' + colors.reset + ' 24h Vol     ' + colors.dim + '│' + colors.reset + ' Bid-Ask %   ' + colors.dim + '│' + colors.reset + ' P-S Spr% ' + colors.dim + '│' + colors.reset + ' Quality  ' + colors.dim + '│' + colors.reset);
-    console.log(colors.dim + '│          │' + colors.reset + ' Current      ' + colors.dim + '│' + colors.reset + ' (USDC)      ' + colors.dim + '│' + colors.reset + ' Perp | Spot ' + colors.dim + '│' + colors.reset + '          ' + colors.dim + '│' + colors.reset + '          ' + colors.dim + '│' + colors.reset);
-    console.log(colors.dim + '├──────────┼──────────────┼─────────────┼─────────────┼──────────┼──────────┤' + colors.reset);
-
-    // Table rows
-    for (const data of fundingData) {
-      if (data.error) continue; // Skip errors
-
-      const symbol = data.symbol || '?';
-
-      // Funding rate - convert from decimal to percentage
-      let currentAPY = 0;
-      if (data.annualizedRate !== undefined && data.annualizedRate !== null) {
-        currentAPY = data.annualizedRate * 100;  // Convert 0.1095 to 10.95%
-      } else if (data.annualizedFundingPercent !== undefined) {
-        currentAPY = data.annualizedFundingPercent;
-      }
-
-      const volume = volumeMap.get(symbol);
-      const perpVolUSDC = volume?.perpVolUSDC || 0;
-      const spotVolUSDC = volume?.spotVolUSDC || 0;
-      const totalVolUSDC = perpVolUSDC + spotVolUSDC;
-
-      const volStr = totalVolUSDC >= 1e9 ? `$${(totalVolUSDC / 1e9).toFixed(0)}B` :
-                     totalVolUSDC >= 1e6 ? `$${(totalVolUSDC / 1e6).toFixed(0)}M` :
-                     totalVolUSDC >= 1e3 ? `$${(totalVolUSDC / 1e3).toFixed(0)}K` :
-                     totalVolUSDC > 0 ? `$${totalVolUSDC.toFixed(0)}` : '---';
-
-      const bidAsk = bidAskMap.get(symbol);
-      const perpSpreadPct = bidAsk?.perpSpreadPercent ?? null;
-      const spotSpreadPct = bidAsk?.spotSpreadPercent ?? null;
-
-      // Format spread with fallback for missing data
-      const perpSpreadStr = perpSpreadPct !== null ? perpSpreadPct.toFixed(3).padStart(5) : ' ---';
-      const spotSpreadStr = spotSpreadPct !== null ? spotSpreadPct.toFixed(3).padStart(5) : ' ---';
-
-      const perpSpot = perpSpotMap.get(symbol);
-      const perpSpotSpreadPct = perpSpot?.spreadPercent != null ? Math.abs(perpSpot.spreadPercent) : null;
-      const perpSpotStr = perpSpotSpreadPct !== null ? perpSpotSpreadPct.toFixed(3).padStart(8) : '     ---';
-
-      // Color funding rate based on value
-      let fundingColorCode = '';
-      if (currentAPY >= 10) fundingColorCode = colors.green;
-      else if (currentAPY >= 5) fundingColorCode = colors.yellow;
-      else if (currentAPY < 0) fundingColorCode = colors.red;
-
-      // Format APY with space for sign (even when positive)
-      const currentAPYStr = currentAPY >= 0 ? ` ${currentAPY.toFixed(1)}` : `${currentAPY.toFixed(1)}`;
-
-      // Quality indicator based on funding
-      const quality = currentAPY >= 10 ? '🟢' : currentAPY >= 5 ? '🟡' : currentAPY < 0 ? '🔴' : '⚪';
-
-      // Highlight current position
-      const isCurrentPosition = hasPosition(state) && getCurrentPosition(state).symbol === symbol;
-      const prefix = isCurrentPosition ? colors.cyan + '►' + colors.reset : ' ';
-      const symbolDisplay = isCurrentPosition ? colors.bright + colors.cyan + symbol.padEnd(9) + colors.reset : symbol.padEnd(9);
-
-      console.log(
-        colors.dim + '│' + colors.reset + prefix + symbolDisplay + colors.dim + '│' + colors.reset +
-        ` ${fundingColorCode}${currentAPYStr.padStart(6)}%${colors.reset}      ${colors.dim}│${colors.reset}` +
-        ` ${volStr.padStart(11)} ${colors.dim}│${colors.reset}` +
-        ` ${perpSpreadStr}${colors.dim} | ${colors.reset}${spotSpreadStr}${colors.dim} │${colors.reset}` +
-        ` ${perpSpotStr} ${colors.dim}│${colors.reset}` +
-        ` ${quality}        ${colors.dim}│${colors.reset}`
-      );
-    }
-
-    console.log(colors.dim + '└──────────┴──────────────┴─────────────┴─────────────┴──────────┴──────────┘' + colors.reset);
-    console.log();
-    console.log(colors.dim + 'Legend: 🟢 Good (≥10% APY) | 🟡 Moderate (5-10% APY) | 🔴 Negative | ► Current' + colors.reset);
-    console.log();
-
-  } catch (error) {
-    console.error(`${colors.red}Failed to fetch market summary: ${error.message}${colors.reset}`);
   }
 
   console.log(colors.dim + '─'.repeat(80) + colors.reset);

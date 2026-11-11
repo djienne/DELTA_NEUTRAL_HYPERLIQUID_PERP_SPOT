@@ -34,12 +34,13 @@ export async function getMarketData(hyperliquid, symbols, config, options = {}) 
     console.log('[Market Data] Fetching comprehensive market data...');
   }
 
-  // Fetch all data in parallel for speed
+  // One metaAndAssetCtxs serves current funding and perp volume; the rest is fetched in parallel
+  const metaAndAssetCtxs = await hyperliquid.infoRequest({ type: 'metaAndAssetCtxs' }, 20);
   const [bidAskSpreads, perpSpotSpreads, volumes, fundingRatesHistory] = await Promise.all([
     getBidAskSpreads(hyperliquid, symbols, { config, verbose: false }),
     getPerpSpotSpreads(hyperliquid, symbols, { config, verbose: false }),
-    get24HourVolumes(hyperliquid, symbols),
-    getFundingRatesWithHistory(hyperliquid, symbols, { days: 7, verbose: false })
+    get24HourVolumes(hyperliquid, symbols, metaAndAssetCtxs),
+    getFundingRatesWithHistory(hyperliquid, symbols, metaAndAssetCtxs)
   ]);
 
   if (verbose) {

@@ -155,7 +155,8 @@ sub-account/vault: info queries use `wallet_address`, and every signed action (o
 - Validate market data before use: bid, ask and mid present with mid > 0, and results `Number.isFinite`. Missing volume
   or funding is `null`, so the pair is rejected, never counted as 0.
 - Tables reserve a sign column: `n >= 0 ? ' ' + n.toFixed(d) : n.toFixed(d)`.
-- Rate-limit (429) errors on market data use `retryWithExponentialBackoff` in `bot.js`.
+- Market data is fetched once per hourly cycle (`scanMarkets` in `bot.js`); the statistics and the 2-minute status table
+  reuse that scan. The connector's weighted limiter paces requests; a failed scan (e.g. a 429) is logged and retried next cycle.
 - Hedge enforcement: 2% difference divided by the larger leg; larger differences are repaired only when executable after lot rounding.
 - New logic gets a unit test in `tests/unit/` with a fake connector; see `trade-cleanup.test.js` for the fake's shape.
 

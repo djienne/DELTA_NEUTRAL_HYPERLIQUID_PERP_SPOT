@@ -45,7 +45,7 @@ Docker persists runtime state under `./data/bot-state.json` by default.
 
 <img src="screen.png" alt="Bot Running Example" width="600">
 
-Real-time display shows: position details, funding info, accumulated earnings, position age, rebalancing status, and market summary.
+Real-time display shows: position details, funding info, accumulated earnings, position age, rebalancing status, and the market table of the last hourly scan.
 
 ---
 
@@ -217,7 +217,7 @@ For a sub-account, create the API key on the master account. Move USDC between t
 * ✅ **Quality Filters**: Volume, spreads, funding thresholds
 * ✅ **Real-time Monitoring**: Status updates every 2 minutes
 * ✅ **Funding History**: Tracks accumulated earnings
-* ✅ **Error Handling**: Exponential backoff on rate limits
+* ✅ **Error Handling**: Weighted API rate limiter; a failed cycle is logged and retried
 * ✅ **Docker Support**: Easy containerized deployment
 * ✅ **Paper Trading**: Realistic dry run of the same code on live market data (`paper-bot` container)
 * ✅ **Rebalance Hold**: Pauses and asks for a manual PERP ↔ SPOT transfer when the split drifts past ± 5 points

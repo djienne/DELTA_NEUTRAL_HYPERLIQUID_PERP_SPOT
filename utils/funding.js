@@ -10,142 +10,6 @@
  * - Funding can be positive (longs pay shorts) or negative (shorts pay longs)
  */
 
-/**
- * Fetch current funding rates for all perpetual symbols
- *
- * @param {HyperliquidConnector} hyperliquid - Initialized Hyperliquid connector
- * @param {Object} options - Optional parameters
- * @param {boolean} options.verbose - Log progress to console
- * @returns {Promise<Map<string, Object>>} Map of symbol -> funding info
- */
-export async function getAllFundingRates(hyperliquid, options = {}) {
-  const { verbose = false } = options;
-
-  if (verbose) {
-    console.log('Fetching funding rates from Hyperliquid API...');
-  }
-
-  // Fetch meta and asset context which includes funding rates
-  const data = await hyperliquid.infoRequest({
-    type: 'metaAndAssetCtxs'
-  }, 20);
-
-  // Extract funding rates from the response
-  // The structure is: data = [meta, assetCtxs]
-  // meta contains the universe of assets
-  // assetCtxs contains current context including funding rates
-
-  const fundingMap = new Map();
-
-  if (data && data.length >= 2) {
-    const meta = data[0];
-    const assetCtxs = data[1];
-
-    // Match assets with their funding rates
-    for (let i = 0; i < meta.universe.length; i++) {
-      const asset = meta.universe[i];
-      const assetCtx = assetCtxs[i];
-
-      if (asset && assetCtx && assetCtx.funding) {
-        fundingMap.set(asset.name, {
-          symbol: asset.name,
-          fundingRate: parseFloat(assetCtx.funding),
-          // Annualize: hourly rate × 24 hours × 365 days
-          annualizedRate: parseFloat(assetCtx.funding) * 24 * 365,
-          // Keep the raw context for additional info
-          ctx: assetCtx
-        });
-      }
-    }
-  }
-
-  if (verbose) {
-    console.log(`✅ Fetched funding rates for ${fundingMap.size} perpetual symbols`);
-  }
-
-  return fundingMap;
-}
-
-/**
- * Get funding rates for specific perpetual symbols
- *
- * @param {HyperliquidConnector} hyperliquid - Initialized Hyperliquid connector
- * @param {string[]} symbols - Array of PERP symbols (e.g., ['BTC', 'ETH', 'SOL'])
- * @param {Object} options - Optional parameters
- * @param {boolean} options.verbose - Log progress to console
- * @returns {Promise<Object[]>} Array of funding rate objects
- */
-export async function getFundingRates(hyperliquid, symbols, options = {}) {
-  const { verbose = false } = options;
-
-  const allRates = await getAllFundingRates(hyperliquid, { verbose });
-
-  const results = [];
-
-  for (const symbol of symbols) {
-    if (allRates.has(symbol)) {
-      results.push(allRates.get(symbol));
-    } else {
-      results.push({
-        symbol: symbol,
-        fundingRate: null,
-        annualizedRate: null,
-        error: `No funding rate data for ${symbol}`
-      });
-    }
-  }
-
-  return results;
-}
-
-/**
- * Fetch historical funding rates for a specific coin
- *
- * @param {HyperliquidConnector} hyperliquid - Initialized Hyperliquid connector
- * @param {string} coin - Coin symbol (e.g., 'BTC')
- * @param {number} days - Number of days of history (default 7)
- * @param {Object} options - Optional parameters
- * @param {boolean} options.verbose - Log progress to console
- * @returns {Promise<Object>} Object with funding history data
- */
-export async function getFundingHistory(hyperliquid, coin, days = 7, options = {}) {
-  const { verbose = false } = options;
-
-  try {
-    const endTime = Date.now();
-    const startTime = endTime - days * 24 * 60 * 60 * 1000;
-
-    if (verbose) {
-      console.log(`Fetching ${days}-day funding history for ${coin}...`);
-    }
-
-    const data = await hyperliquid.infoRequest({
-      type: 'fundingHistory',
-      coin: coin,
-      startTime: startTime,
-      endTime
-    }, 20);
-
-    validateFundingWindow(data, startTime, endTime, days * 24);
-
-    if (verbose) {
-      console.log(`✅ Fetched ${data.length} funding rate entries for ${coin}`);
-    }
-
-    return {
-      coin: coin,
-      history: data,
-      startTime: startTime,
-      endTime,
-      days: days
-    };
-
-  } catch (error) {
-    console.error(`Error fetching funding history for ${coin}:`, error.message);
-    throw error;
-  }
-}
-
 // A short or gapped sample is not a seven-day estimator, even if its mean is finite.
 export function validateFundingWindow(history, startTime, endTime, expectedHours = 168) {
   if (!Array.isArray(history) || history.length !== expectedHours) {
@@ -165,114 +29,30 @@ export function validateFundingWindow(history, startTime, endTime, expectedHours
 }
 
 /**
- * Calculate average funding rate from history
- *
- * @param {Object[]} history - Array of funding history entries
- * @returns {Object} Statistics object with avg, min, max
+ * Current funding (from `metaAndAssetCtxs` = [meta, assetCtxs], fetched once per scan by the caller) and each symbol's
+ * 7-day average. No current rate: `error`. No complete 168-hour history: `historyError` (the pair is then rejected).
+ * @returns {Promise<Array<{symbol, fundingRate, annualizedRate, history?: {count, avg: {annualized}}}>>}
  */
-export function calculateFundingStats(history) {
-  if (!history || history.length === 0) {
-    return {
-      count: 0,
-      avgHourly: null,
-      avgAnnualized: null,
-      minHourly: null,
-      maxHourly: null,
-      minAnnualized: null,
-      maxAnnualized: null
-    };
-  }
-
-  const rates = history.map(h => parseFloat(h.fundingRate));
-
-  const sum = rates.reduce((acc, r) => acc + r, 0);
-  const avgHourly = sum / rates.length;
-  const avgAnnualized = avgHourly * 24 * 365;
-
-  const minHourly = Math.min(...rates);
-  const maxHourly = Math.max(...rates);
-  const minAnnualized = minHourly * 24 * 365;
-  const maxAnnualized = maxHourly * 24 * 365;
-
-  return {
-    count: rates.length,
-    avgHourly: avgHourly,
-    avgAnnualized: avgAnnualized,
-    minHourly: minHourly,
-    maxHourly: maxHourly,
-    minAnnualized: minAnnualized,
-    maxAnnualized: maxAnnualized
-  };
-}
-
-/**
- * Get current funding rate with 7-day historical statistics
- *
- * @param {HyperliquidConnector} hyperliquid - Initialized Hyperliquid connector
- * @param {string[]} symbols - Array of PERP symbols
- * @param {Object} options - Optional parameters
- * @param {number} options.days - Number of days of history (default 7)
- * @param {boolean} options.verbose - Log progress to console
- * @returns {Promise<Object[]>} Array of funding rate objects with history
- */
-export async function getFundingRatesWithHistory(hyperliquid, symbols, options = {}) {
-  const { days = 7, verbose = false } = options;
-
-  // Get current rates
-  const currentRates = await getFundingRates(hyperliquid, symbols, { verbose });
-
-  // Fetch history for each symbol
+export async function getFundingRatesWithHistory(hyperliquid, symbols, [meta, assetCtxs]) {
   const results = [];
-
-  for (const current of currentRates) {
-    if (current.error) {
-      results.push(current);
+  for (const symbol of symbols) {
+    const funding = assetCtxs[meta.universe.findIndex(asset => asset?.name === symbol)]?.funding;
+    if (!funding) {
+      results.push({ symbol, fundingRate: null, annualizedRate: null, error: `No funding rate data for ${symbol}` });
       continue;
     }
-
+    const current = { symbol, fundingRate: parseFloat(funding), annualizedRate: parseFloat(funding) * 24 * 365 };
     try {
-      const historyData = await getFundingHistory(hyperliquid, current.symbol, days, { verbose: false });
-      const stats = calculateFundingStats(historyData.history);
-
-      results.push({
-        ...current,
-        history: {
-          days: days,
-          count: stats.count,
-          avg: {
-            hourly: stats.avgHourly,
-            annualized: stats.avgAnnualized
-          },
-          min: {
-            hourly: stats.minHourly,
-            annualized: stats.minAnnualized
-          },
-          max: {
-            hourly: stats.maxHourly,
-            annualized: stats.maxAnnualized
-          },
-          // Compare current to average
-          vsCurrent: {
-            hourlyDiff: current.fundingRate - stats.avgHourly,
-            annualizedDiff: current.annualizedRate - stats.avgAnnualized,
-            percentChange: stats.avgHourly !== 0
-              ? ((current.fundingRate - stats.avgHourly) / stats.avgHourly) * 100
-              : 0
-          }
-        }
-      });
-
-      if (verbose) {
-        console.log(`  ${current.symbol}: Current ${(current.annualizedRate * 100).toFixed(2)}% vs 7d avg ${(stats.avgAnnualized * 100).toFixed(2)}%`);
-      }
-
+      const endTime = Date.now();
+      const startTime = endTime - 7 * 24 * 60 * 60 * 1000;
+      const history = await hyperliquid.infoRequest({ type: 'fundingHistory', coin: symbol, startTime, endTime }, 20);
+      validateFundingWindow(history, startTime, endTime, 7 * 24);
+      const avgHourly = history.reduce((sum, h) => sum + parseFloat(h.fundingRate), 0) / history.length;
+      results.push({ ...current, history: { count: history.length, avg: { annualized: avgHourly * 24 * 365 } } });
     } catch (error) {
-      results.push({
-        ...current,
-        historyError: error.message
-      });
+      console.error(`Error fetching funding history for ${symbol}:`, error.message);  // the report only counts rejections
+      results.push({ ...current, historyError: error.message });
     }
   }
-
   return results;
 }

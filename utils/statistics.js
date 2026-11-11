@@ -1,95 +1,14 @@
 import { perpToSpot } from './symbols.js';
 import { getPerpPositions, getSpotBalances, formatPrice } from './positions.js';
-import { getFundingRatesWithHistory } from './funding.js';
-import { get24HourVolumes } from './volume.js';
-import { getBidAskSpreads } from './spread.js';
-import { getPerpSpotSpreads } from './arbitrage.js';
 import { getBalances } from './balance.js';
 
 /**
- * Format a statistics report with market data
- * @param {HyperliquidConnector} hyperliquid - Hyperliquid connector
- * @param {string[]} symbols - Symbols to analyze
- * @param {Object} config - Configuration
- * @param {Object} options - Options
- * @returns {Promise<string>} Formatted statistics report
+ * The 7-day market table the bot decides on, from one findBestOpportunities scan (its `marketData`). ► marks the held pair.
  */
-export async function generateStatisticsReport(hyperliquid, symbols, config, options = {}) {
-  const { verbose = false } = options;
-
-  if (verbose) {
-    console.log('[Stats] Gathering market statistics...');
-  }
-
-  // Balances and positions
-  const wallet = hyperliquid.wallet;
-  const balances = await getBalances(hyperliquid, wallet);
-  const perpBalance = balances.perpBalance;
-  const spotBalance = balances.spotBalance;
-  const totalBalance = balances.totalBalance;
-
-  const [perpPositions, spotBalances] = await Promise.all([
-    getPerpPositions(hyperliquid, wallet, { verbose: false }),
-    getSpotBalances(hyperliquid, wallet, { verbose: false })
-  ]);
-
-  // Market data
-  const [fundingRates, volumes, bidAskSpreads, perpSpotSpreads] = await Promise.all([
-    getFundingRatesWithHistory(hyperliquid, symbols, { days: 7, verbose: false }),
-    get24HourVolumes(hyperliquid, symbols),
-    getBidAskSpreads(hyperliquid, symbols, { config, verbose: false }),
-    getPerpSpotSpreads(hyperliquid, symbols, { config, verbose: false })
-  ]);
-
-
-  // Helpers
+export function formatMarketTable(marketData, symbols, held = null) {
+  const { fundingRates, volumes, bidAskSpreads, perpSpotSpreads } = marketData;
   const fmtSigned = (n, digits = 1) => (n >= 0 ? ` ${n.toFixed(digits)}` : n.toFixed(digits)); // width ~5
   const lines = [];
-
-  // Header
-  lines.push('');
-  lines.push('='.repeat(80));
-  lines.push('Market Statistics Report');
-  lines.push('='.repeat(80));
-  lines.push('');
-
-  // Account Summary
-  const perpBalancePct = totalBalance > 0 ? (perpBalance / totalBalance * 100) : 0;
-  const spotBalancePct = totalBalance > 0 ? (spotBalance / totalBalance * 100) : 0;
-  lines.push('Account Summary:');
-  lines.push(`   Wallet: ${wallet}`);
-  lines.push(`   PERP Balance: $${perpBalance.toFixed(2)} (${perpBalancePct.toFixed(1)}%)`);
-  lines.push(`   SPOT Balance: $${spotBalance.toFixed(2)} (${spotBalancePct.toFixed(1)}%)`);
-  lines.push(`   Total Balance: $${totalBalance.toFixed(2)}`);
-  lines.push('');
-
-  // Positions Summary
-  lines.push('Current Positions:');
-  if (perpPositions.length === 0 && spotBalances.length === 0) {
-    lines.push('   No open positions');
-  } else {
-    if (perpPositions.length > 0) {
-      lines.push(`   PERP Positions (${perpPositions.length}):`);
-      for (const pos of perpPositions) {
-        lines.push(`     ${pos.symbol}: ${pos.side.toUpperCase()} ${pos.size} @ $${formatPrice(pos.entryPrice)} (PnL: $${pos.unrealizedPnl.toFixed(2)})`);
-      }
-    }
-    if (spotBalances.length > 0) {
-      lines.push(`   SPOT Balances (${spotBalances.length}, excluding USDC):`);
-      for (const bal of spotBalances.slice(0, 5)) {
-        const value = bal.valueUSD ?? 0;
-        lines.push(`     ${bal.symbol}: ${bal.total.toFixed(6)} ($${value.toFixed(2)})`);
-      }
-      if (spotBalances.length > 5) {
-        lines.push(`     ... and ${spotBalances.length - 5} more`);
-      }
-    }
-  }
-  lines.push('');
-
-  // Market Data Table
-  lines.push('Market Data for Tracked Symbols:');
-  lines.push('');
 
   const COLS = { symbol: 10, funding: 15, vol: 13, bidask: 15, psspr: 10, quality: 10 };
   const top = '┌' + '─'.repeat(COLS.symbol) + '┬' + '─'.repeat(COLS.funding) + '┬' + '─'.repeat(COLS.vol) + '┬' + '─'.repeat(COLS.bidask) + '┬' + '─'.repeat(COLS.psspr) + '┬' + '─'.repeat(COLS.quality) + '┐';
@@ -155,7 +74,7 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
     const bidAskCell = `${String(perpSpread).padStart(5)}|${String(spotSpread).padStart(5)}`;
 
     lines.push(
-      cell(symbol, COLS.symbol, 'left') +
+      `│${symbol === held ? '►' : ' '}${symbol.slice(0, COLS.symbol - 2).padEnd(COLS.symbol - 1)}` +
       cell(fundingCell, COLS.funding, 'right') +
       cell(volStr, COLS.vol, 'right') +
       cell(bidAskCell, COLS.bidask, 'right') +
@@ -165,23 +84,70 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
   }
 
   lines.push(bot);
-  lines.push('');
-  lines.push('Legend: GOOD (≥10% APY) | MOD (5–10% APY) | NEG (<0% APY) | Avg = 7-day avg | Now = current hour');
-  lines.push('');
-  lines.push('='.repeat(80));
-  lines.push('');
-
+  lines.push('Legend: GOOD (≥10% APY) | MOD (5–10% APY) | NEG (<0% APY) | Avg = 7-day avg | Now = current hour | ► held');
   return lines.join('\n');
 }
 
 /**
- * Log statistics report to console
- * @param {HyperliquidConnector} hyperliquid - Hyperliquid connector
- * @param {string[]} symbols - Symbols to analyze
- * @param {Object} config - Configuration
- * @param {Object} options - Options
+ * Account summary plus the market table of the given scan; no market fetches of its own.
  */
-export async function logStatistics(hyperliquid, symbols, config, options = {}) {
-  const report = await generateStatisticsReport(hyperliquid, symbols, config, options);
-  console.log(report);
+export async function logStatistics(hyperliquid, marketData, symbols, held = null) {
+  const wallet = hyperliquid.wallet;
+  const { perpBalance, spotBalance, totalBalance } = await getBalances(hyperliquid, wallet);
+  const [perpPositions, spotBalances] = await Promise.all([
+    getPerpPositions(hyperliquid, wallet, { verbose: false }),
+    getSpotBalances(hyperliquid, wallet, { verbose: false })
+  ]);
+  const lines = [];
+
+  // Header
+  lines.push('');
+  lines.push('='.repeat(80));
+  lines.push('Market Statistics Report');
+  lines.push('='.repeat(80));
+  lines.push('');
+
+  // Account Summary
+  const perpBalancePct = totalBalance > 0 ? (perpBalance / totalBalance * 100) : 0;
+  const spotBalancePct = totalBalance > 0 ? (spotBalance / totalBalance * 100) : 0;
+  lines.push('Account Summary:');
+  lines.push(`   Wallet: ${wallet}`);
+  lines.push(`   PERP Balance: $${perpBalance.toFixed(2)} (${perpBalancePct.toFixed(1)}%)`);
+  lines.push(`   SPOT Balance: $${spotBalance.toFixed(2)} (${spotBalancePct.toFixed(1)}%)`);
+  lines.push(`   Total Balance: $${totalBalance.toFixed(2)}`);
+  lines.push('');
+
+  // Positions Summary
+  lines.push('Current Positions:');
+  if (perpPositions.length === 0 && spotBalances.length === 0) {
+    lines.push('   No open positions');
+  } else {
+    if (perpPositions.length > 0) {
+      lines.push(`   PERP Positions (${perpPositions.length}):`);
+      for (const pos of perpPositions) {
+        lines.push(`     ${pos.symbol}: ${pos.side.toUpperCase()} ${pos.size} @ $${formatPrice(pos.entryPrice)} (PnL: $${pos.unrealizedPnl.toFixed(2)})`);
+      }
+    }
+    if (spotBalances.length > 0) {
+      lines.push(`   SPOT Balances (${spotBalances.length}, excluding USDC):`);
+      for (const bal of spotBalances.slice(0, 5)) {
+        const value = bal.valueUSD ?? 0;
+        lines.push(`     ${bal.symbol}: ${bal.total.toFixed(6)} ($${value.toFixed(2)})`);
+      }
+      if (spotBalances.length > 5) {
+        lines.push(`     ... and ${spotBalances.length - 5} more`);
+      }
+    }
+  }
+  lines.push('');
+
+  // Market Data Table
+  lines.push('Market Data for Tracked Symbols:');
+  lines.push('');
+  lines.push(formatMarketTable(marketData, symbols, held));
+  lines.push('');
+  lines.push('='.repeat(80));
+  lines.push('');
+
+  console.log(lines.join('\n'));
 }
