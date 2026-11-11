@@ -10,7 +10,8 @@ import { getTakerFees } from '../utils/risk.js';
  *    today's 7d-average gap, in days. This is the physical "how much of a gap is actually earned"
  *    horizon -> config.bot.switchHorizonDays. Stable across halves = trustworthy.
  * 2. Replays the production decision (utils/position-decision.js switchEdge) hour by hour and reports
- *    net APY after fees for each half, against the old rule and against never switching.
+ *    net APY after fees for each half, against the old rule and against never switching. Each half is the mean
+ *    [min..max] of STARTS replays started a day apart: the first pick alone moves a half by up to ~35 points.
  *    Pick parameters on the flat part of the scans, not the peak: each half has only ~5-30 switches.
  * Assumptions: realized hourly funding stands in for the rate the bot sees; spreads are a fixed
  * SPREAD_PCT; volume/spread filters are ignored (all configured pairs always eligible).
@@ -60,7 +61,9 @@ async function fundingHistory(coin) {
   }
   cache[coin] = c;
   fs.mkdirSync('./data', { recursive: true });
-  fs.writeFileSync(CACHE, zlib.brotliCompressSync(JSON.stringify(cache)));  // per coin: an interrupted run keeps it
+  // Per coin, so an interrupted run keeps it. Quality 9: 0.25 s and 309 KB per write; the default 11 took 4.4 s for 231 KB
+  const q = { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 9 } };
+  fs.writeFileSync(CACHE, zlib.brotliCompressSync(JSON.stringify(cache), q));
   return new Map(c.rows.filter(([h]) => h >= want / 36e5));
 }
 
@@ -135,13 +138,20 @@ function simulate(rule, a, b, { minHoldDays = config.bot?.minHoldTimeDays ?? 7, 
     if (held && Number.isFinite(R[held][t])) earned += R[held][t];
     hours++;
   }
-  return `${((earned - cost) / (hours / YEAR) * 100).toFixed(1).padStart(6)}% (${String(switches).padStart(3)} opens)`;
+  return [(earned - cost) / (hours / YEAR) * 100, switches];  // net APY %, opens
 }
 
-const row = (label, rule, opts) => console.log(`${label.padEnd(38)}${simulate(rule, 0, MID, opts)}  |${simulate(rule, MID, T, opts)}`);
+const STARTS = 14;
+function half(rule, a, b, opts) {
+  const runs = Array.from({ length: STARTS }, (_, k) => simulate(rule, Math.max(a, W) + k * D, b, opts));
+  const apy = runs.map(r => r[0]), mean = (xs) => xs.reduce((x, y) => x + y) / STARTS;
+  return `${mean(apy).toFixed(1).padStart(6)}% [${Math.min(...apy).toFixed(0)}..${Math.max(...apy).toFixed(0)}]`.padEnd(20) +
+    `(${mean(runs.map(r => r[1])).toFixed(0).padStart(3)} opens)`;
+}
+const row = (label, rule, opts) => console.log(`${label.padEnd(38)}${half(rule, 0, MID, opts)}  |${half(rule, MID, T, opts)}`);
 console.log(`\nSpan ${(T / D).toFixed(0)} days, halves of ${(MID / D).toFixed(0)} days. Round-trip cost ${((2 * LEG + SPREAD) * 100).toFixed(2)}%.`);
 console.log(`beta(14d), effective days of a 7d-avg gap earned over 14 days:  H1 ${beta14(0, MID).toFixed(1)}  H2 ${beta14(MID, T).toFixed(1)}  full ${beta14(0, T).toFixed(1)}  (config switchHorizonDays = ${config.bot?.switchHorizonDays ?? 8})`);
-console.log(`\n${'Net APY after fees'.padEnd(38)}${'first half'.padEnd(24)}|second half`);
+console.log(`\n${'Net APY after fees, mean [range]'.padEnd(38)}${'first half'.padEnd(32)}|second half`);
 row('configured rule', 'config');
 row('old rule (hour rate, 2x, hold 14d)', 'old');
 row('never switch (first pick)', 'never');

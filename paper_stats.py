@@ -184,6 +184,12 @@ def main():
     print(f'  Daily Sharpe (annualized): {sharpe:.2f} over {len(rets)} days' if sharpe is not None
           else f'  Daily Sharpe: needs >= 5 daily returns (have {len(rets)})')
 
+    calib = Path('data/calibration.log')  # appended monthly by the "Delta-neutral switch calibration" scheduled task
+    if calib.exists():
+        last = calib.read_text(encoding='utf8', errors='replace').split('=== ')[-1].splitlines()
+        print(f'\nLast switch calibration ({last[0].strip()}, full output in {calib})')
+        print('\n'.join('  ' + l for l in last if l.startswith(('beta', 'configured', '  min hold 7d', '  min hold 30d'))))
+
     if args.plot:
         import matplotlib
         matplotlib.use('Agg')
