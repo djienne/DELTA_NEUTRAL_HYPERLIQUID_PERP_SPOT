@@ -102,8 +102,9 @@ async function main() {
   console.log();
 
   const hyperliquid = new HyperliquidConnector({ testnet: false });
-  await hyperliquid.connect();
-  console.log(`Connected - Wallet: ${hyperliquid.wallet}`);
+  // Books, positions and orders all have a REST path: a WebSocket outage must not block an emergency close
+  await hyperliquid.connect().catch(e => console.warn(`WebSocket unavailable (${e.message}): continuing over REST`));
+  console.log(`Wallet: ${hyperliquid.wallet}`);
   console.log();
 
   // Fetch all positions in parallel

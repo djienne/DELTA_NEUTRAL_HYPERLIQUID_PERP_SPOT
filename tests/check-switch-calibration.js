@@ -40,7 +40,8 @@ async function fundingHistory(coin) {
       if (res.status !== 429) { page = await res.json(); break; }
       await new Promise(r => setTimeout(r, 5000 * (i + 1)));
     }
-    await new Promise(r => setTimeout(r, 1100));  // fundingHistory weighs 20 of 1200/min
+    // fundingHistory weighs 20 of the 1200/min per-IP limit, which every bot on this PC shares: 6 s = 200/min
+    await new Promise(r => setTimeout(r, 6000));
     if (!page?.length) break;
     for (const p of page) out.set(Math.round(p.time / 36e5), parseFloat(p.fundingRate));
     start = page[page.length - 1].time + 1;

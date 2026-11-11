@@ -57,6 +57,7 @@ function compactPositionData(positionData) {
     accountingComplete: positionData.accountingComplete !== false,
     openFeesActual: positionData.openFeesActual || 0,
     openFeesEstimated: positionData.openFeesEstimated || 0,
+    adoptedAt: positionData.adoptedAt,  // hold clock of an adopted position whose openTime is unknown
     orderSummary: {
       perp: compactOrderResult(positionData.perpResult),
       spot: compactOrderResult(positionData.spotResult)

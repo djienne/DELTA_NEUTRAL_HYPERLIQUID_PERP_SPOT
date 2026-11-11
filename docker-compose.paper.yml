@@ -14,8 +14,10 @@ services:
       resources:
         limits:
           cpus: '0.5'
+          memory: '256M'  # uses ~76 MB
     build: .
     container_name: hyperliquid-paper-bot
+    stop_grace_period: 35s  # shutdown() waits up to 30 s for in-flight orders (bot.js)
     # Network outages are ridden out in-process; this restarts it if the process dies and, with Docker Desktop set to
     # start at sign-in, after PC restarts
     restart: unless-stopped

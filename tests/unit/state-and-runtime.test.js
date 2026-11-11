@@ -156,8 +156,10 @@ test('corrupt state file is quarantined instead of silently reused', () => {
 
 test('adopted position with unknown opening time: the minimum hold counts from adoption, then it can switch', () => {
   const day = 24 * 3600000;
-  assert.equal(canClosePosition({ openTime: null, adoptedAt: Date.now() - 8 * day }, 7 * day), true);
-  assert.equal(canClosePosition({ openTime: null, adoptedAt: Date.now() - day }, 7 * day), false);
+  // Through recordPosition, as adoptOnChainPair stores it: adoptedAt must survive the state compaction
+  const adopted = ago => recordPosition({}, { symbol: 'HYPE', openTime: null, adoptedAt: Date.now() - ago }).position;
+  assert.equal(canClosePosition(adopted(8 * day), 7 * day), true);
+  assert.equal(canClosePosition(adopted(day), 7 * day), false);
   assert.equal(canClosePosition({ openTime: Date.now() - 8 * day, adoptedAt: Date.now() }, 7 * day), true);  // known time wins
   assert.equal(canClosePosition({ openTime: null }, 7 * day), false);
 });

@@ -206,7 +206,7 @@ For a sub-account, create the API key on the master account. Move USDC between t
 - `thresholds.minFundingRatePercent`: Min funding APY (default: 5%)
 - `risk.maxHedgeMismatchPercent`: Maximum live size mismatch (default: 2%); differences below the executable order minimum are reported as dust.
 - `risk.minFillRatio`: Minimum fill ratio required before an order is treated as complete
-- `risk.startupCleanupMode`: Startup behavior for imbalanced exposure (`report-only`, `hedge-only`, or `hedge-or-close`; default: `hedge-only`)
+- `risk.startupCleanupMode`: Startup behavior for imbalanced exposure (`report-only`, `hedge-only`, or `hedge-or-close`; default: `hedge-only`). While running, a rejected re-hedge (e.g. the short was liquidated) always closes the measured excess instead
 
 ---
 

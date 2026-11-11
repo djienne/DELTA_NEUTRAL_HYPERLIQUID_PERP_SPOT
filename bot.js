@@ -399,7 +399,9 @@ async function runCycle() {
         return;
       } else if (onChainPosition.status === 'imbalanced') {
         console.log(`${timestamp()} [Bot] Managed on-chain exposure is imbalanced. Halting new decisions this cycle.`);
-        const repair = await autoHedgeAll(hyperliquid, config, { verbose: true, fallbackToClose: false, ...managedScope(position) });
+        // A rejected re-short (e.g. no perp margin left after a liquidation) sells the measured spot excess instead of
+        // leaving a naked long; an unknown order outcome never falls back. Startup keeps risk.startupCleanupMode.
+        const repair = await autoHedgeAll(hyperliquid, config, { verbose: true, fallbackToClose: true, ...managedScope(position) });
         if (repair.totalProcessed > 0) {
           state = { ...state, position: { ...state.position, accountingComplete: false } };
           saveState(state);
@@ -852,7 +854,7 @@ async function displayStatus() {
       const spotSpreadStr = spotSpreadPct !== null ? spotSpreadPct.toFixed(3).padStart(5) : ' ---';
 
       const perpSpot = perpSpotMap.get(symbol);
-      const perpSpotSpreadPct = perpSpot?.spreadPercent !== undefined ? Math.abs(perpSpot.spreadPercent) : null;
+      const perpSpotSpreadPct = perpSpot?.spreadPercent != null ? Math.abs(perpSpot.spreadPercent) : null;
       const perpSpotStr = perpSpotSpreadPct !== null ? perpSpotSpreadPct.toFixed(3).padStart(8) : '     ---';
 
       // Color funding rate based on value

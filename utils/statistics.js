@@ -136,9 +136,9 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
     const avgFunding = avgFundingNum !== null ? fmtSigned(avgFundingNum) : 'N/A';
     const nowFunding = nowFundingNum !== null ? fmtSigned(nowFundingNum) : 'N/A';
     const volStr = volume?.totalVolUSDC ? `$${(volume.totalVolUSDC / 1e6).toFixed(0)}M` : 'N/A';
-    const perpSpread = bidAskPerp?.spreadPercent !== undefined ? bidAskPerp.spreadPercent.toFixed(3) : 'N/A';
-    const spotSpread = bidAskSpot?.spreadPercent !== undefined ? bidAskSpot.spreadPercent.toFixed(3) : 'N/A';
-    const psSpr = perpSpot?.spreadPercent !== undefined ? Math.abs(perpSpot.spreadPercent).toFixed(3) : 'N/A';
+    const perpSpread = bidAskPerp?.spreadPercent != null ? bidAskPerp.spreadPercent.toFixed(3) : 'N/A';  // null = fetch failed
+    const spotSpread = bidAskSpot?.spreadPercent != null ? bidAskSpot.spreadPercent.toFixed(3) : 'N/A';
+    const psSpr = perpSpot?.spreadPercent != null ? Math.abs(perpSpot.spreadPercent).toFixed(3) : 'N/A';
 
     let quality = '';
     // Quality follows the decision basis: the 7-day average
