@@ -1,4 +1,4 @@
-import HyperliquidConnector from '../hyperliquid.js';
+import { perpToSpot } from './symbols.js';
 
 const toNumber = v => (Number.isFinite(parseFloat(v)) ? parseFloat(v) : null);
 
@@ -16,7 +16,7 @@ export async function get24HourVolumes(hyperliquid, perpSymbols) {
   const spotVolume = new Map(spotCtxs.map(ctx => [ctx.coin, toNumber(ctx.dayNtlVlm)]));
 
   return Promise.all(perpSymbols.map(async perpSymbol => {
-    const spotSymbol = HyperliquidConnector.perpToSpot(perpSymbol);
+    const spotSymbol = perpToSpot(perpSymbol);
     const spotCoin = await hyperliquid.getAssetId(spotSymbol, true)
       .then(id => hyperliquid.getCoinForOrderbook(spotSymbol, id), () => null);
     const perpVolUSDC = perpVolume.get(perpSymbol) ?? null;

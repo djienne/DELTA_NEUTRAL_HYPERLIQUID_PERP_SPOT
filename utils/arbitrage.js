@@ -1,4 +1,4 @@
-import HyperliquidConnector from '../hyperliquid.js';
+import { perpToSpot } from './symbols.js';
 import { fetchWithConcurrencyLimit } from './spread.js';
 
 /**
@@ -27,7 +27,7 @@ function calculatePerpSpotSpreadPercent(perpMid, spotMid) {
  */
 async function getSinglePerpSpotSpread(hyperliquid, perpSymbol, priceMap) {
   try {
-    const spotSymbol = HyperliquidConnector.perpToSpot(perpSymbol);
+    const spotSymbol = perpToSpot(perpSymbol);
 
     // Get mid prices from the price map
     const perpMid = priceMap[perpSymbol];
@@ -58,7 +58,7 @@ async function getSinglePerpSpotSpread(hyperliquid, perpSymbol, priceMap) {
   } catch (error) {
     return {
       perpSymbol: perpSymbol,
-      spotSymbol: HyperliquidConnector.perpToSpot(perpSymbol),
+      spotSymbol: perpToSpot(perpSymbol),
       perpMid: null,
       spotMid: null,
       spreadPercent: null,
@@ -108,7 +108,7 @@ export async function getPerpSpotSpreads(hyperliquid, perpSymbols, options = {})
 
   // Calculate spreads for each pair
   const tasks = perpSymbols.map(perpSymbol => async () => {
-    const spotSymbol = HyperliquidConnector.perpToSpot(perpSymbol);
+    const spotSymbol = perpToSpot(perpSymbol);
 
     if (verbose) {
       console.log(`Checking spread for ${perpSymbol} vs ${spotSymbol}...`);

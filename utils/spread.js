@@ -1,4 +1,4 @@
-import HyperliquidConnector from '../hyperliquid.js';
+import { perpToSpot } from './symbols.js';
 
 /**
  * Bid-Ask spread utility functions for Hyperliquid trading
@@ -131,7 +131,7 @@ export async function getBidAskSpreads(hyperliquid, perpSymbols, options = {}) {
 
   // Create all fetch promises for both perp and spot
   const fetchTasks = perpSymbols.flatMap(perpSymbol => {
-    const spotSymbol = HyperliquidConnector.perpToSpot(perpSymbol);
+    const spotSymbol = perpToSpot(perpSymbol);
 
     if (verbose) {
       console.log(`Checking spreads for ${perpSymbol} / ${spotSymbol}...`);

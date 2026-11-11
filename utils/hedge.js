@@ -1,4 +1,4 @@
-import HyperliquidConnector from '../hyperliquid.js';
+import { perpToSpot, spotToPerp } from './symbols.js';
 import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral, executableSize } from './positions.js';
 import { assertCompleteFill } from './order-fill.js';
 import { getMinFillRatio, getMaxHedgeMismatchPercent, getTakerFees } from './risk.js';
@@ -25,19 +25,19 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
     ...spot.map(p => ({ symbol: p.symbol, size: p.total, isSpot: true }))]) {
     const price = await priceFor(p.symbol, p.isSpot);
     if (await executableSize(hyperliquid, p.symbol, p.isSpot, p.size, price)) {
-      active.add(p.isSpot ? HyperliquidConnector.spotToPerp(p.symbol) : p.symbol);
+      active.add(p.isSpot ? spotToPerp(p.symbol) : p.symbol);
     } else {
       dust.push({ ...p, valueUSD: p.size * price });
     }
   }
   const analysis = analyzeDeltaNeutral(
     perp.filter(p => active.has(p.symbol)),
-    spot.filter(p => active.has(HyperliquidConnector.spotToPerp(p.symbol))),
+    spot.filter(p => active.has(spotToPerp(p.symbol))),
     { maxHedgeMismatchPercent }
   );
   const hedgeNeeds = [];
   async function add(perpSymbol, size, targetMarket, targetSide, fallbackMarket, fallbackSide, type) {
-    const spotSymbol = HyperliquidConnector.perpToSpot(perpSymbol);
+    const spotSymbol = perpToSpot(perpSymbol);
     const targetSymbol = targetMarket === 'SPOT' ? spotSymbol : perpSymbol;
     const fallbackCloseSymbol = fallbackMarket === 'SPOT' ? spotSymbol : perpSymbol;
     const isSpot = targetMarket === 'SPOT';
@@ -68,7 +68,7 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
       'PERP', p.side === 'SHORT' ? 'buy' : 'sell', 'PERP_NEEDS_SPOT');
   }
   for (const p of analysis.unmatchedSpot) {
-    await add(HyperliquidConnector.spotToPerp(p.symbol), p.balance.total, 'PERP', 'sell', 'SPOT', 'sell', 'SPOT_NEEDS_PERP_SHORT');
+    await add(spotToPerp(p.symbol), p.balance.total, 'PERP', 'sell', 'SPOT', 'sell', 'SPOT_NEEDS_PERP_SHORT');
   }
   return { analysis, hedgeNeeds, dust, symbols: [...active], needsHedging: hedgeNeeds.length > 0 };
 }

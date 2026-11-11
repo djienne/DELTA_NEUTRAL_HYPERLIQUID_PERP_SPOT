@@ -1,4 +1,4 @@
-import HyperliquidConnector from '../hyperliquid.js';
+import { perpToSpot } from './symbols.js';
 
 export function getMaxBidAskSpreadPercent(thresholds = {}) {
   return thresholds.maxSpreadPercent ?? 0.15;
@@ -35,7 +35,7 @@ export function getManagedSpotSymbols(config = {}, currentPosition = null) {
   const managed = new Set(config.risk?.managedSpotSymbols || []);
 
   for (const pair of config.trading?.pairs || []) {
-    managed.add(HyperliquidConnector.perpToSpot(pair));
+    managed.add(perpToSpot(pair));
   }
 
   if (currentPosition?.spotSymbol) {

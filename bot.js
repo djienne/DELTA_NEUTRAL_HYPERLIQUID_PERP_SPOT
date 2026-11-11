@@ -12,6 +12,7 @@ import { getManagedPerpSymbols, getManagedSpotSymbols, getMaxHedgeMismatchPercen
 import { getCurrentPositionFundingSignal, switchEdge } from './utils/position-decision.js';
 import { PaperConnector } from './utils/paper-exchange.js';
 import { formatPrice } from './utils/positions.js';
+import { perpToSpot } from './utils/symbols.js';
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -72,7 +73,6 @@ async function retryWithExponentialBackoff(fn, options = {}) {
 
 // Configuration
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
-HyperliquidConnector.configureSymbolMapping(config.symbolMapping || {});
 
 // PAPER_TRADING=1: same bot, simulated account (utils/paper-exchange.js). Paper state always lives in ./data-paper/,
 // whatever BOT_STATE_FILE says (e.g. the live service's), so paper can never write into the live state.
@@ -218,7 +218,7 @@ function adoptOnChainPair(pair, botState, reason, persist = saveState) {
     accountingComplete: previous.accountingComplete !== false && previous.perpSize === pair.perpSize && previous.spotSize === pair.spotSize
   } : {
     success: true, symbol: pair.symbol, perpSymbol: pair.symbol,
-    spotSymbol: HyperliquidConnector.perpToSpot(pair.symbol),
+    spotSymbol: perpToSpot(pair.symbol),
     perpSize: pair.perpSize, spotSize: pair.spotSize,
     perpEntryPrice: pair.perpPosition.entryPrice > 0 ? pair.perpPosition.entryPrice : null,
     spotEntryPrice: null, positionValue: pair.perpPosition.positionValue,
@@ -557,7 +557,7 @@ async function openPosition(opportunity, reason) {
     type: 'opening',
     symbol: opportunity.symbol,
     perpSymbol: opportunity.symbol,
-    spotSymbol: HyperliquidConnector.perpToSpot(opportunity.symbol),
+    spotSymbol: perpToSpot(opportunity.symbol),
     reason
   });
   saveState(state);
@@ -764,7 +764,7 @@ async function displayStatus() {
     const bidAskSpreads = [];
     try {
       for (const symbol of config.trading.pairs) {
-        const spotSymbol = HyperliquidConnector.perpToSpot(symbol);
+        const spotSymbol = perpToSpot(symbol);
         const spotAssetId = await hyperliquid.getAssetId(spotSymbol, true);
         const spotCoin = hyperliquid.getCoinForOrderbook(spotSymbol, spotAssetId);
 

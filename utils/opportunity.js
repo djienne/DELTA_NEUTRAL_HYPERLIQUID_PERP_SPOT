@@ -1,4 +1,4 @@
-import HyperliquidConnector from '../hyperliquid.js';
+import { spotToPerp } from './symbols.js';
 import { getBidAskSpreads } from './spread.js';
 import { getPerpSpotSpreads } from './arbitrage.js';
 import { get24HourVolumes } from './volume.js';
@@ -72,7 +72,7 @@ export function filterOpportunities(marketData, thresholds) {
   // For bidAskSpreads, group perp and spot together by PERP symbol
   const bidAskMap = new Map();
   for (const spread of marketData.bidAskSpreads) {
-    const perpSymbol = spread.isSpot ? HyperliquidConnector.spotToPerp(spread.symbol) : spread.symbol;
+    const perpSymbol = spread.isSpot ? spotToPerp(spread.symbol) : spread.symbol;
 
     if (!bidAskMap.has(perpSymbol)) {
       bidAskMap.set(perpSymbol, {

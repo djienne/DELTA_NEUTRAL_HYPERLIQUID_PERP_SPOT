@@ -24,7 +24,6 @@ if (process.env.PAPER_TRADING === '1') {
 }
 
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
-HyperliquidConnector.configureSymbolMapping(config.symbolMapping || {});
 
 async function closePosition(hyperliquid, position, type, priceMap) {
   const symbol = position.symbol;

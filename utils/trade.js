@@ -1,4 +1,4 @@
-import HyperliquidConnector from '../hyperliquid.js';
+import { perpToSpot } from './symbols.js';
 import { setLeverageTo1x } from './leverage.js';
 import { getKnownFee, getSizeMismatchPercent, getOrderFees, normalizeOrderOutcome } from './order-fill.js';
 import { getMaxOpenHedgeMismatchPercent, getMinFillRatio, getTakerFees, getMaxBidAskSpreadPercent } from './risk.js';
@@ -72,7 +72,7 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
 
   const symbol = opportunity.symbol;
   const perpSymbol = symbol;
-  const spotSymbol = HyperliquidConnector.perpToSpot(symbol);
+  const spotSymbol = perpToSpot(symbol);
 
   if (verbose) {
     console.log(`[Trade] Opening delta-neutral position for ${symbol}...`);

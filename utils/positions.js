@@ -1,4 +1,4 @@
-import HyperliquidConnector from '../hyperliquid.js';
+import { perpToSpot, spotToPerp } from './symbols.js';
 import { getSizeMismatchPercent } from './order-fill.js';
 
 /**
@@ -149,7 +149,7 @@ export async function getSpotBalances(hyperliquid, user = null, options = {}) {
       if ((!managedSet || managedSet.has(coin)) && (!Number.isFinite(total) || !Number.isFinite(hold) || total < 0 || hold < 0 || hold > total)) {
         throw new Error(`Invalid spot exposure for ${coin}`);
       }
-      const price = parseFloat(mids[HyperliquidConnector.spotToPerp(coin)]);
+      const price = parseFloat(mids[spotToPerp(coin)]);
       const valueUSD = total * price;
 
       // Only non-USDC balances worth at least MIN_NOTIONAL_USD (unknown price is kept, not dropped)
@@ -200,7 +200,7 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
   const spotMap = new Map();
   for (const balance of spotBalances) {
     // Convert spot symbol to perp symbol (UBTC -> BTC, UETH -> ETH, etc.)
-    const perpSymbol = HyperliquidConnector.spotToPerp(balance.symbol);
+    const perpSymbol = spotToPerp(balance.symbol);
     spotMap.set(perpSymbol, balance);
   }
 
@@ -252,7 +252,7 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
   // Remaining spot balances are unmatched
   for (const [symbol, balance] of spotMap) {
     unmatchedSpot.push({
-      symbol: HyperliquidConnector.perpToSpot(symbol), // Convert back to spot symbol
+      symbol: perpToSpot(symbol), // Convert back to spot symbol
       balance: balance
     });
   }

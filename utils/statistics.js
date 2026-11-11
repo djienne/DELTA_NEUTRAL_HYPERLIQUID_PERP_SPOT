@@ -1,4 +1,4 @@
-import HyperliquidConnector from '../hyperliquid.js';
+import { perpToSpot } from './symbols.js';
 import { getPerpPositions, getSpotBalances, formatPrice } from './positions.js';
 import { getFundingRatesWithHistory } from './funding.js';
 import { get24HourVolumes } from './volume.js';
@@ -126,7 +126,7 @@ export async function generateStatisticsReport(hyperliquid, symbols, config, opt
     const funding = fundingRates.find(f => f.symbol === symbol);
     const volume = volumes.find(v => v.perpSymbol === symbol);
     const bidAskPerp = bidAskSpreads.find(s => s.symbol === symbol && !s.isSpot);
-    const spotSymbol = HyperliquidConnector.perpToSpot(symbol);
+    const spotSymbol = perpToSpot(symbol);
     const bidAskSpot = bidAskSpreads.find(s => s.symbol === spotSymbol && s.isSpot);
     const perpSpot = perpSpotSpreads.find(s => s.perpSymbol === symbol);
 

@@ -37,7 +37,7 @@ Never run it (or `emergency-close.js`) from an agent session.
 
 - `bot.js`: orchestrator. Startup recovery, hourly `runCycle`, 2-minute `displayStatus`, `openPosition`, `closeAndReopen`.
 - `hyperliquid.js`: connector. REST orderbooks (freshness-checked), WebSocket orders with REST fallback, EIP-712 signing,
-  weighted REST rate limiter (1200 weight/min), price/size rounding, PERP↔SPOT symbol mapping.
+  weighted REST rate limiter (1200 weight/min), price/size rounding. PERP↔SPOT symbol map: `utils/symbols.js`.
 - `utils/position-decision.js`: the switch rule (`switchEdge`) and the held position's funding signal.
 - `utils/opportunity.js`: market data → filters → ranking (`findBestOpportunities`).
 - `utils/trade.js`: open/close with parallel PERP+SPOT orders, fill verification, cleanup of orphan legs.
@@ -114,7 +114,7 @@ cost = 2 × (perp fee + spot fee) + candidate perp + spot spread      (close-onl
 
 | Key | Meaning |
 |---|---|
-| `trading.pairs` | PERP symbols; SPOT via `HyperliquidConnector.perpToSpot` (e.g. BTC→UBTC) |
+| `trading.pairs` | PERP symbols; SPOT via `symbolMapping.perpToSpot` (`utils/symbols.js`, e.g. BTC→UBTC) |
 | `trading.minOrderSizeUSD` / `maxOrderSizeUSD` | per-symbol minimum; optional cap |
 | `trading.balanceUtilizationPercent` | 95 |
 | `trading.maxSlippagePercent` | 5 (percent) |
