@@ -46,6 +46,12 @@ test('verification never hides orphan legs, multiple pairs or a different record
   }
 });
 
+test('two imbalanced pairs: autoHedgeAll places no order and reports failure', async () => {
+  const e = exchange({ BTC: -1, ETH: -1 }, {});
+  assert.equal((await autoHedgeAll(e, config)).success, false);
+  assert.equal(e.calls.length, 0);
+});
+
 test('2 percent mismatch boundary and executable dust have different outcomes', async () => {
   const at = await verifyPositionOnChain(exchange({BTC:-100},{UBTC:98}), initial());
   assert.equal(at.status, 'delta_neutral');

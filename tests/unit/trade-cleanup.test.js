@@ -109,6 +109,13 @@ test('both rejected open requests use on-chain reconciliation for cleanup', asyn
   assert.ok(hyperliquid.calls.some(call => call.symbol === 'BTC' && call.side === 'buy' && call.size === 1));
 });
 
+test('unequal PERP/SPOT balances size both legs from the smaller side', async () => {
+  const hyperliquid = exchange({}, {});
+  const open = await openDeltaNeutralPosition(hyperliquid, baseOpportunity, { perpBalance: 1000, spotBalance: 500 }, baseConfig);
+  assert.equal(open.success, true, open.error);
+  assert.ok(hyperliquid.calls.every(c => c.size * 100 <= 50), 'each leg <= 10% of the $500 side');
+});
+
 const position = { symbol: 'BTC', perpSymbol: 'BTC', spotSymbol: 'UBTC', perpSize: 1, spotSize: 1,
   perpEntryPrice: 100, spotEntryPrice: 100, openTime: Date.now() - 1000 };
 
@@ -132,4 +139,11 @@ test('close sizes from on-chain balances and succeeds after a partial fill plus 
   assert.equal(result.success, true);
   assert.equal(hyperliquid.calls.find(call => call.symbol === 'UBTC').size, 0.9993);
   assert.equal(hyperliquid.calls.filter(call => call.symbol === 'BTC' && call.side === 'buy').length, 2);
+});
+
+test('closing a PERP LONG sells it and ends flat', async () => {
+  const hyperliquid = exchange({ BTC: 1 }, {});
+  await closeDeltaNeutralPosition(hyperliquid, position, baseConfig);
+  assert.equal(hyperliquid.calls[0].side, 'sell');
+  assert.deepEqual(hyperliquid.perps, {});
 });

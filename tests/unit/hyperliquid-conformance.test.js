@@ -266,10 +266,12 @@ test('createMarketOrder refreshes stale orderbook before pricing', async () => {
   assert.equal(action.orders[0].p, '105');
 });
 
-test('roundPrice avoids exponential notation', () => {
+test('price and size rounding: 5 significant figures, decimal cap, no exponent, exact lots', () => {
   const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
-
+  assert.equal(connector.roundPrice(89015.325, 5, false), '89015');         // perp: 5 significant figures
+  assert.equal(connector.roundPrice(0.0035498765, 0, true), '0.0035499');  // sub-cent spot: still 5 significant figures
   assert.equal(connector.roundPrice(0.000012345, 2, true).includes('e'), false);
+  assert.equal(connector.roundSize(1234.56, 2, 'down'), '1234.56');        // an exact lot is not shrunk by float error
 });
 
 test('getUserFundingHistory pages past the 500-row API cap without losing rows that share an hour', async () => {
