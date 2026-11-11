@@ -5,7 +5,7 @@
  * IOC limit price, signing). Only the exchange's ACCOUNT and EXECUTION side is simulated; market data is live.
  *
  * What is simulated, and how:
- *  - Orders: every signed request goes through fetchJsonWithTimeout(exchangeUrl) (WebSocket orders are routed to REST).
+ *  - Orders: every signed request goes through fetchJsonWithTimeout(exchangeUrl).
  *    Rejected like the exchange when the size has more than szDecimals decimals, the price more than 5 significant
  *    figures (integers exempt) or (6 perp | 8 spot) - szDecimals decimals, size x mid < $10, or reduceOnly on spot.
  *    IOC fill = walk the live L2 book (full precision) up to the order's limit price; level-by-level VWAP, partial fills
@@ -188,15 +188,13 @@ export class PaperConnector extends HyperliquidConnector {
   // ---------------------------------------------------------------- lifecycle
 
   async connect() {
-    await super.connect();
-    this.ticker ??= setInterval(() => this.tick(), MINUTE);  // WebSocket reconnects call connect() again: one ticker
+    this.ticker ??= setInterval(() => this.tick(), MINUTE);  // one ticker even if connect() is called again
     await this.tick();
   }
 
   disconnect() {
     clearInterval(this.ticker);
     this.ticker = null;
-    super.disconnect();
   }
 
   /** Every minute; never throws. Replays funding/liquidations, lands transfers, plays the operator, logs equity. */
@@ -361,10 +359,6 @@ export class PaperConnector extends HyperliquidConnector {
   }
 
   // ---------------------------------------------------------------- simulated exchange endpoints
-
-  async createOrderWebSocket(...args) {
-    return this.createOrderRest(...args);  // paper orders never touch the WebSocket
-  }
 
   async fetchJsonWithTimeout(url, init, options) {
     if (url !== this.exchangeUrl) {

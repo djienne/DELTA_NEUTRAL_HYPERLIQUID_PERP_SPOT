@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import HyperliquidConnector from '../../hyperliquid.js';
 import { PaperConnector, walkBook, liquidationPx } from '../../utils/paper-exchange.js';
 import { openDeltaNeutralPosition, closeDeltaNeutralPosition } from '../../utils/trade.js';
 import { getBalances, rebalanceNeeded } from '../../utils/balance.js';
@@ -188,31 +187,26 @@ test('simulated manual transfer: does what rebalance-status.json asks, one at a 
   assert.equal(reloaded.mutate(L => reloaded.operator(L, now + 61 * MINUTE))[0].amount, 50);
 });
 
-test('WebSocket reconnects call connect() again: the paper ticker is not duplicated', async () => {
+test('connect() twice does not duplicate the paper ticker; disconnect() stops it', async () => {
   const { paper } = makePaper();
-  const connect = HyperliquidConnector.prototype.connect;
-  HyperliquidConnector.prototype.connect = async () => {};
   paper.tick = async () => {};
   try {
     await paper.connect();
     const ticker = paper.ticker;
-    await paper.connect();  // what handleReconnect / the REST-fallback probe do
+    await paper.connect();
     assert.equal(paper.ticker, ticker);
   } finally {
-    HyperliquidConnector.prototype.connect = connect;
     paper.disconnect();
   }
   assert.equal(paper.ticker, null);
 });
 
-test('safety: WebSocket orders go to the simulator, user queries fail closed, no credentials are loaded', async () => {
+test('safety: orders go to the simulator, user queries fail closed, no credentials are loaded', async () => {
   const { paper, market } = makePaper();
   assert.equal(paper.exchangeUrl, 'paper://exchange');
   assert.equal(paper.vaultAddress, null);
   assert.notEqual(paper.wallet, makePaper().paper.wallet);  // fresh random key, not hyperliquid.env
 
-  paper.connected = true;
-  paper.ws = { send: () => { throw new Error('paper orders must not use the WebSocket'); } };
   const result = await paper.createMarketOrder('BTC', 'sell', 0.5, {});
   assert.ok(result.response.data.statuses[0].filled);
 

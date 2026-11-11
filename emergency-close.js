@@ -60,8 +60,6 @@ async function main() {
   console.log();
 
   const hyperliquid = new HyperliquidConnector({ testnet: false });
-  // Books, positions and orders all have a REST path: a WebSocket outage must not block an emergency close
-  await hyperliquid.connect().catch(e => console.warn(`WebSocket unavailable (${e.message}): continuing over REST`));
   console.log(`Wallet: ${hyperliquid.wallet}`);
   console.log();
 
@@ -76,7 +74,6 @@ async function main() {
 
   if (totalPositions === 0) {
     console.log('✅ No open positions to close.');
-    hyperliquid.disconnect();
     process.exit(0);
   }
 
@@ -173,7 +170,6 @@ async function main() {
     console.log('✅ No remaining exposure above minimum notional.');
   }
 
-  hyperliquid.disconnect();
   process.exit(failed.length > 0 || residuals.length > 0 ? 1 : 0);
 }
 

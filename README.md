@@ -144,7 +144,7 @@ The paper bot has its own compose file and project (`delta-neutral-paper`), apar
 
 - **Reset**: stop it, delete `./data-paper/`, start again: a new $1,000 account (500 PERP / 500 SPOT, `config.json` → `paper`).
 - **Without Docker**: `PAPER_TRADING=1 node bot.js` (PowerShell: `$env:PAPER_TRADING=1; node bot.js`, and the variable stays set in that window). State always goes to `./data-paper/`, whatever `BOT_STATE_FILE` says, so paper can never write into the live state.
-- **Outages and PC restarts**: network outages are ridden out in-process (requests retry, the WebSocket reconnects with backoff), and `restart: unless-stopped` restarts the container if the process dies. For PC restarts, enable Docker Desktop → Settings → General → *Start Docker Desktop when you sign in*. Every account change is written atomically. On restart, the simulator first replays what the exchange did while it was down (hourly funding, paid exactly once, and a liquidation check on 15-min candles) before the bot may trade.
+- **Outages and PC restarts**: network outages are ridden out in-process (requests retry), and `restart: unless-stopped` restarts the container if the process dies. For PC restarts, enable Docker Desktop → Settings → General → *Start Docker Desktop when you sign in*. Every account change is written atomically. On restart, the simulator first replays what the exchange did while it was down (hourly funding, paid exactly once, and a liquidation check on 15-min candles) before the bot may trade.
 - **Next to the live bot**: both can run at once (separate containers and folders, `data/` and `data-paper/`). The paper bot caps itself at a third of the per-IP API budget (400 of 1200 weight/min). `emergency-close.js` always acts on the LIVE account and refuses to run with `PAPER_TRADING=1`.
 
 **Real vs simulated**
@@ -244,7 +244,7 @@ bot.js (main loop)
 
 **Utilities**: `position-decision.js` (switch rule), `funding.js`, `volume.js`, `spread.js`, `arbitrage.js`, `positions.js`, `leverage.js`, `risk.js`
 
-**Connector**: `hyperliquid.js` (WebSocket + REST API, EIP-712 signatures, rate limiting); `utils/paper-exchange.js` swaps in the simulated account for paper trading
+**Connector**: `hyperliquid.js` (REST API, EIP-712 signatures, rate limiting); `utils/paper-exchange.js` swaps in the simulated account for paper trading
 
 ---
 

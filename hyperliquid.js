@@ -1,4 +1,3 @@
-import WebSocket from 'ws';
 import fs from 'fs';
 import { SlidingWindowRateLimiter } from './utils/rate-limiter.js';
 import { ethers } from 'ethers';
@@ -10,18 +9,15 @@ const CREDENTIALS_FILE = 'hyperliquid.env';  // wallet_address, private_key, is_
 
 class HyperliquidConnector {
   constructor(options = {}) {
-    this.wsUrl = options.wsUrl || 'wss://api.hyperliquid.xyz/ws';
     this.restUrl = options.restUrl || 'https://api.hyperliquid.xyz/info';
     this.exchangeUrl = options.exchangeUrl || 'https://api.hyperliquid.xyz/exchange';
     this.testnet = options.testnet || false;
     this.marketDataHub = this.testnet ? '' : (options.marketDataHub ?? process.env.HL_PUBLIC_HTTP ?? '');
     if (this.marketDataHub) {
       this.marketDataHub = this.marketDataHub.replace(/\/$/, '');
-      this.wsUrl = this.marketDataHub.replace(/^http/, 'ws') + '/ws?consumer=delta-neutral';
     }
 
     if (this.testnet) {
-      this.wsUrl = 'wss://api.hyperliquid-testnet.xyz/ws';
       this.restUrl = 'https://api.hyperliquid-testnet.xyz/info';
       this.exchangeUrl = 'https://api.hyperliquid-testnet.xyz/exchange';
     }
@@ -42,28 +38,6 @@ class HyperliquidConnector {
       this.signer = new ethers.Wallet(this.privateKey);
     }
 
-    // Connection state
-    this.ws = null;
-    this.connected = false;
-    this.reconnecting = false;
-    this.intentionalDisconnect = false; // Flag to prevent auto-reconnect after manual disconnect
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = options.maxReconnectAttempts || 10;
-    this.reconnectDelay = options.reconnectDelay || 1000;
-    this.maxReconnectDelay = options.maxReconnectDelay || 30000;
-
-    // Health monitoring
-    this.pingInterval = options.pingInterval || 30000;
-    this.pongTimeout = options.pongTimeout || 10000;
-    this.pingTimer = null;
-    this.pongTimer = null;
-    this.connectionTimeout = null; // Connection timeout timer
-    this.lastPongReceived = Date.now();
-
-    // WebSocket recovery probe after the reconnect attempts run out (orders use REST meanwhile)
-    this.fallbackReconnectInterval = options.fallbackReconnectInterval || 60000;
-    this.fallbackReconnectTimer = null;
-
     this.maxOrderbookAgeMs = options.maxOrderbookAgeMs || 10000;
     this.infoTimeoutMs = options.infoTimeoutMs || 15000;
     this.orderTimeoutMs = options.orderTimeoutMs || 20000;
@@ -72,8 +46,6 @@ class HyperliquidConnector {
     this.orderbooks = new Map();
 
     // Request tracking
-    this.requestId = 0;
-    this.pendingRequests = new Map();
     this.lastNonce = options.lastNonce || 0;
 
     // REST: max 1200 weight per minute (l2Book has weight 2)
@@ -93,87 +65,10 @@ class HyperliquidConnector {
     return ethers.hexlify(ethers.randomBytes(16));
   }
 
-  /**
-   * Connect to Hyperliquid WebSocket
-   */
-  async connect() {
-    return new Promise((resolve, reject) => {
-      try {
-        this.intentionalDisconnect = false; // Reset flag when connecting
-        this.ws = new WebSocket(this.wsUrl);
+  // Lifecycle hooks: orders and data are all REST, nothing to open or close. PaperConnector runs its simulator here.
+  async connect() {}
 
-        this.ws.on('open', () => {
-          console.log('[Hyperliquid] WebSocket connected');
-          this.connected = true;
-          this.reconnecting = false;
-          this.reconnectAttempts = 0;
-
-          // Clear connection timeout
-          if (this.connectionTimeout) {
-            clearTimeout(this.connectionTimeout);
-            this.connectionTimeout = null;
-          }
-
-          // Start health monitoring
-          this.startHealthMonitoring();
-          resolve();
-        });
-
-        this.ws.on('message', (data) => {
-          this.handleMessage(data);
-        });
-
-        this.ws.on('pong', () => {
-          this.handlePong();
-        });
-
-        this.ws.on('error', (error) => {
-          console.error('[Hyperliquid] WebSocket error:', error.message);  // the close handler reconnects
-        });
-
-        this.ws.on('close', () => {
-          console.log('[Hyperliquid] WebSocket closed');
-          this.connected = false;
-          this.stopHealthMonitoring();  // also clears connectionTimeout, so settle connect() here
-          reject(new Error('WebSocket closed before opening'));  // no-op once open; else a failed attempt hangs forever
-
-          // Attempt to reconnect only if not intentionally disconnected
-          if (!this.reconnecting && !this.intentionalDisconnect) {
-            this.handleReconnect();
-          }
-        });
-
-        // Connection timeout
-        this.connectionTimeout = setTimeout(() => {
-          if (!this.connected) {
-            reject(new Error('Connection timeout'));
-            if (this.ws) {
-              this.ws.terminate();
-            }
-          }
-        }, 10000);
-
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  handlePong() {
-    this.lastPongReceived = Date.now();
-    if (this.pongTimer) {
-      clearTimeout(this.pongTimer);
-      this.pongTimer = null;
-    }
-  }
-
-  sendWebSocketMessage(message) {
-    if (!this.connected || !this.ws) {
-      throw new Error('Not connected');
-    }
-
-    this.ws.send(JSON.stringify(message));
-  }
+  disconnect() {}
 
   buildL2BookPayload(coin, options = {}) {
     const { nSigFigs = 5 } = options;
@@ -197,6 +92,7 @@ class HyperliquidConnector {
     } = options;
     const controller = new AbortController();
     let timeoutId;
+    let status;  // HTTP status, once the server answered
 
     try {
       const timeoutPromise = new Promise((_, reject) => {
@@ -215,6 +111,7 @@ class HyperliquidConnector {
         }),
         timeoutPromise
       ]);
+      status = response.status;
 
       if (!response.ok) {
         const errorText = typeof response.text === 'function'
@@ -235,13 +132,12 @@ class HyperliquidConnector {
         throw new Error(`Invalid JSON response: ${error.message}`);
       }
     } catch (error) {
+      // An order with no definitive answer (timeout, network failure, 5xx) may have reached the exchange: only the
+      // chain can tell, so the caller reconciles before retrying. A 4xx answer means it was refused.
+      if (unknownOnTimeout && !error.isUnknownOrderOutcome && !(status < 500)) {
+        throw new UnknownOrderOutcomeError(`Order outcome unknown: ${error.message}`, context);
+      }
       if (error.name === 'AbortError') {
-        if (unknownOnTimeout) {
-          throw new UnknownOrderOutcomeError(
-            `Order request timed out after ${timeoutMs}ms`,
-            context
-          );
-        }
         throw new Error(`REST request timed out after ${timeoutMs}ms`);
       }
       throw error;
@@ -269,46 +165,6 @@ class HyperliquidConnector {
       timeoutMs: this.infoTimeoutMs,
       context: { requestType: payload?.type || 'info' }
     });
-  }
-
-  /**
-   * Handle WebSocket messages
-   */
-  handleMessage(data) {
-    try {
-      const message = JSON.parse(data.toString());
-
-      if (message.channel === 'pong') {
-        this.handlePong();
-        return;
-      }
-
-      // Handle post responses
-      if (message.channel === 'post') {
-        const { id, response } = message.data;
-
-        if (this.pendingRequests.has(id)) {
-          const { resolve, reject, timeout } = this.pendingRequests.get(id);
-
-          // Clear the timeout
-          if (timeout) {
-            clearTimeout(timeout);
-          }
-
-          this.pendingRequests.delete(id);
-
-          if (response.type === 'error') {
-            reject(new Error(response.payload));
-          } else {
-            resolve(response.payload);
-          }
-        }
-
-        return;
-      }
-    } catch (error) {
-      console.error('[Hyperliquid] Error parsing message:', error);
-    }
   }
 
   /**
@@ -393,167 +249,6 @@ class HyperliquidConnector {
     }
   }
 
-  /**
-   * Start health monitoring with ping/pong
-   */
-  startHealthMonitoring() {
-    this.stopHealthMonitoring();
-    this.lastPongReceived = Date.now();  // new socket: a pong from before an outage must not kill it (reconnect loop)
-
-    this.pingTimer = setInterval(() => {
-      if (!this.connected || !this.ws) {
-        return;
-      }
-
-      // Check if we received a pong recently
-      const timeSinceLastPong = Date.now() - this.lastPongReceived;
-      if (timeSinceLastPong > this.pongTimeout + this.pingInterval) {
-        console.error('[Hyperliquid] Pong timeout, connection may be dead');
-        if (this.ws) {
-          this.ws.terminate();
-        }
-        return;
-      }
-
-      // Send ping
-      try {
-        this.sendWebSocketMessage({ method: 'ping' });
-
-        // Set pong timeout
-        if (this.pongTimer) {
-          clearTimeout(this.pongTimer);
-        }
-        this.pongTimer = setTimeout(() => {
-          console.error('[Hyperliquid] Pong timeout');
-          if (this.ws) {
-            this.ws.terminate();
-          }
-        }, this.pongTimeout);
-      } catch (error) {
-        console.error('[Hyperliquid] Error sending ping:', error);
-      }
-    }, this.pingInterval);
-  }
-
-  /**
-   * Stop health monitoring
-   */
-  stopHealthMonitoring() {
-    if (this.pingTimer) {
-      clearInterval(this.pingTimer);
-      this.pingTimer = null;
-    }
-
-    if (this.pongTimer) {
-      clearTimeout(this.pongTimer);
-      this.pongTimer = null;
-    }
-
-    if (this.connectionTimeout) {
-      clearTimeout(this.connectionTimeout);
-      this.connectionTimeout = null;
-    }
-  }
-
-  /**
-   * Handle reconnection with exponential backoff
-   */
-  async handleReconnect() {
-    if (this.reconnecting) {
-      return;
-    }
-
-    this.reconnecting = true;
-    this.reconnectAttempts++;
-
-    if (this.reconnectAttempts > this.maxReconnectAttempts) {
-      console.error('[Hyperliquid] Max reconnect attempts reached, switching to REST fallback');
-      this.reconnecting = false;
-      this.startFallbackReconnectProbe();
-      return;
-    }
-
-    // Calculate backoff delay
-    const delay = Math.min(
-      this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
-      this.maxReconnectDelay
-    );
-
-    console.log(`[Hyperliquid] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-
-    setTimeout(async () => {
-      try {
-        await this.connect();
-        console.log('[Hyperliquid] Reconnected successfully');
-      } catch (error) {
-        console.error('[Hyperliquid] Reconnection failed:', error);
-        this.reconnecting = false;
-        this.handleReconnect();
-      }
-    }, delay);
-  }
-
-  startFallbackReconnectProbe() {
-    if (this.fallbackReconnectTimer || this.intentionalDisconnect) {
-      return;
-    }
-
-    this.fallbackReconnectTimer = setInterval(async () => {
-      if (this.intentionalDisconnect || this.connected || this.reconnecting) {
-        return;
-      }
-
-      try {
-        console.log('[Hyperliquid] Probing WebSocket recovery from REST fallback');
-        this.reconnectAttempts = 0;
-        await this.connect();
-        this.stopFallbackReconnectProbe();
-      } catch (error) {
-        console.error('[Hyperliquid] WebSocket recovery probe failed:', error.message);
-      }
-    }, this.fallbackReconnectInterval);
-  }
-
-  stopFallbackReconnectProbe() {
-    if (this.fallbackReconnectTimer) {
-      clearInterval(this.fallbackReconnectTimer);
-      this.fallbackReconnectTimer = null;
-    }
-  }
-
-  /**
-   * Disconnect from Hyperliquid
-   */
-  disconnect() {
-    console.log('[Hyperliquid] Disconnecting');
-
-    this.intentionalDisconnect = true; // Prevent auto-reconnect
-    this.reconnecting = false;
-    this.stopHealthMonitoring();
-    this.stopFallbackReconnectProbe();
-
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
-
-    this.connected = false;
-    this.orderbooks.clear();
-    for (const [id, pending] of this.pendingRequests.entries()) {
-      if (pending.timeout) {
-        clearTimeout(pending.timeout);
-      }
-      if (pending.kind === 'order') {
-        pending.reject(new UnknownOrderOutcomeError('Disconnected while order request was pending; reconcile on-chain before retrying', {
-          ...(pending.context || {}),
-          requestId: id
-        }));
-      } else {
-        pending.reject(new Error('Disconnected while request was pending'));
-      }
-    }
-    this.pendingRequests.clear();
-  }
   /**
    * Get asset metadata (to find asset IDs and szDecimals), fetched once
    */
@@ -999,12 +694,7 @@ class HyperliquidConnector {
       nonce
     };
 
-    // Try WebSocket first if connected, otherwise use REST
-    if (this.connected && !this.marketDataHub) {
-      return await this.createOrderWebSocket(action, nonce, orderContext);
-    } else {
-      return await this.createOrderRest(action, nonce, orderContext);
-    }
+    return await this.createOrderRest(action, nonce, orderContext);
   }
 
   // The signed /exchange body. A sub-account/vault must be named in every action, or the API key acts on its master.
@@ -1014,73 +704,14 @@ class HyperliquidConnector {
     return payload;
   }
 
-  // The one REST /exchange call. unknownOnTimeout (orders): a timeout or unreadable reply is an UnknownOrderOutcomeError.
+  // The one REST /exchange call. unknownOnTimeout (orders): no definitive reply (timeout, network failure, 5xx,
+  // unreadable body) is an UnknownOrderOutcomeError.
   async postAction(action, nonce, { unknownOnTimeout = false, context = {} } = {}) {
     return this.fetchJsonWithTimeout(this.exchangeUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(await this.signedPayload(action, nonce))
     }, { timeoutMs: this.orderTimeoutMs, unknownOnTimeout, context });
-  }
-
-  /**
-   * Create order via WebSocket
-   */
-  async createOrderWebSocket(action, nonce, context = {}) {
-    if (!this.connected) {
-      throw new Error('Not connected to WebSocket');
-    }
-
-    const payload = await this.signedPayload(action, nonce);
-
-    return new Promise((resolve, reject) => {
-      const id = ++this.requestId;
-
-      const request = {
-        method: 'post',
-        id,
-        request: {
-          type: 'action',
-          payload
-        }
-      };
-
-      // Store pending request with timeout
-      const timeoutId = setTimeout(() => {
-        if (this.pendingRequests.has(id)) {
-          this.pendingRequests.delete(id);
-          reject(new UnknownOrderOutcomeError('WebSocket order request timed out; reconcile on-chain before retrying', {
-            ...context,
-            nonce,
-            requestId: id
-          }));
-        }
-      }, 10000);
-
-      this.pendingRequests.set(id, {
-        resolve,
-        reject,
-        timeout: timeoutId,
-        kind: 'order',
-        context: {
-          ...context,
-          nonce,
-          requestId: id
-        }
-      });
-
-      // Send request
-      try {
-        this.ws.send(JSON.stringify(request));
-        console.log('[Hyperliquid] Order sent via WebSocket');
-      } catch (error) {
-        if (this.pendingRequests.has(id)) {
-          clearTimeout(this.pendingRequests.get(id).timeout);
-          this.pendingRequests.delete(id);
-        }
-        reject(error);
-      }
-    });
   }
 
   /**

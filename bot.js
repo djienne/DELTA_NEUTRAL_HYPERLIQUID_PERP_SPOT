@@ -104,7 +104,7 @@ async function initialize() {
   console.log(`[Bot] Wallet: ${hyperliquid.wallet}${hyperliquid.vaultAddress ? ' (sub-account/vault: orders signed with vaultAddress)' : ''}`);
   console.log();
 
-  // Connect the WebSocket (order sending; books are read over REST)
+  // Everything is REST; the paper connector starts its simulator here
   await hyperliquid.connect();
   console.log('[Bot] Connected to Hyperliquid');
   console.log();

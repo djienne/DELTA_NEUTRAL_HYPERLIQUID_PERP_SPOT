@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
 import { ethers } from 'ethers';
 import HyperliquidConnector from '../../hyperliquid.js';
 import { UnknownOrderOutcomeError } from '../../utils/order-fill.js';
@@ -8,8 +7,6 @@ import { updateLeverage } from '../../utils/leverage.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import net from 'node:net';
-import { spawnSync } from 'node:child_process';
 
 test('central market data preserves full-precision requests and never falls back upstream', async () => {
   const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null, marketDataHub: 'http://hub:8766' });
@@ -21,67 +18,9 @@ test('central market data preserves full-precision requests and never falls back
   await connector.requestL2BookRest('BTC', { nSigFigs: null });
   assert.equal(calls[0].url, 'http://hub:8766/book?coin=BTC');
   assert.equal(calls[0].options.method, 'GET');
-  assert.equal(connector.wsUrl, 'ws://hub:8766/ws?consumer=delta-neutral');
   assert.equal(connector.exchangeUrl, 'https://api.hyperliquid.xyz/exchange');
   connector.fetchJsonWithTimeout = async () => { throw new Error('hub down'); };
   await assert.rejects(connector.requestL2BookRest('BTC'), /hub down/);
-});
-
-class FakeWebSocket extends EventEmitter {
-  constructor() {
-    super();
-    this.sent = [];
-    this.pingCalls = 0;
-    this.terminated = false;
-    this.closed = false;
-  }
-
-  send(message) {
-    this.sent.push(JSON.parse(message));
-  }
-
-  ping() {
-    this.pingCalls++;
-  }
-
-  terminate() {
-    this.terminated = true;
-  }
-
-  close() {
-    this.closed = true;
-  }
-}
-
-test('health monitoring uses app-level ping and handles app-level pong', async () => {
-  const connector = new HyperliquidConnector({
-    wallet: '0x0',
-    privateKey: null,
-    pingInterval: 5,
-    pongTimeout: 100
-  });
-  const ws = new FakeWebSocket();
-
-  connector.connected = true;
-  connector.ws = ws;
-  connector.lastPongReceived = Date.now();
-
-  try {
-    connector.startHealthMonitoring();
-    await new Promise(resolve => setTimeout(resolve, 20));
-  } finally {
-    connector.stopHealthMonitoring();
-  }
-
-  assert.equal(ws.pingCalls, 0);
-  assert.ok(ws.sent.some(message => message.method === 'ping'));
-
-  connector.pongTimer = setTimeout(() => {}, 1000);
-  connector.lastPongReceived = 0;
-  connector.handleMessage(JSON.stringify({ channel: 'pong' }));
-
-  assert.equal(connector.pongTimer, null);
-  assert.ok(connector.lastPongReceived > 0);
 });
 
 test('infoRequest uses injected fetch and weighted REST limiter', async () => {
@@ -208,24 +147,21 @@ test('REST order parse failure is treated as unknown outcome', async () => {
   );
 });
 
-test('disconnect rejects pending order requests as unknown outcomes', async () => {
+test('REST order with no definitive answer (timeout, network failure, 5xx) is unknown; a 4xx is a refusal', async () => {
   const connector = new HyperliquidConnector({
     wallet: '0x0000000000000000000000000000000000000001',
-    privateKey: `0x${'1'.repeat(64)}`
+    privateKey: `0x${'1'.repeat(64)}`,
+    orderTimeoutMs: 5
   });
-  connector.connected = true;
-  connector.ws = new FakeWebSocket();
-
-  const action = {
-    type: 'order',
-    orders: [{ a: 0, b: true, p: '100', s: '1', r: false, t: { limit: { tif: 'Ioc' } } }],
-    grouping: 'na'
-  };
-  const pending = connector.createOrderWebSocket(action, 123, { coin: 'BTC' });
-  await new Promise(resolve => setImmediate(resolve));
-  connector.disconnect();
-
-  await assert.rejects(pending, UnknownOrderOutcomeError);
+  const action = { type: 'order', orders: [], grouping: 'na' };
+  const reply = status => async () => ({ ok: false, status, text: async () => 'error' });
+  for (const fetch of [() => new Promise(() => {}), async () => { throw new TypeError('fetch failed'); }, reply(502)]) {
+    connector.fetch = fetch;
+    await assert.rejects(() => connector.createOrderRest(action, 123, { coin: 'BTC' }), UnknownOrderOutcomeError);
+  }
+  connector.fetch = reply(429);
+  await assert.rejects(() => connector.createOrderRest(action, 123, { coin: 'BTC' }),
+    error => !error.isUnknownOrderOutcome && /HTTP 429/.test(error.message));
 });
 
 test('createMarketOrder refreshes stale orderbook before pricing', async () => {
@@ -286,36 +222,6 @@ test('getUserFundingHistory pages past the 500-row API cap without losing rows t
 
   assert.equal(history.count, 502);
   assert.ok(Math.abs(history.totalAccumulated - 5.02) < 1e-9);
-});
-
-test('network outage: a failed WebSocket connect rejects promptly and does not crash the process', async () => {
-  const server = net.createServer();
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address();
-  await new Promise(resolve => server.close(resolve));  // nothing listens there any more: connection refused
-
-  // Child process: exit 0 when connect() rejects. An unlistened 'error' crashes it (exit 1); a promise that never
-  // settles (reconnect stuck at attempt 1, startup hanging instead of exiting for Docker to restart) times out (exit 3).
-  const script = `const { default: C } = await import(${JSON.stringify(new URL('../../hyperliquid.js', import.meta.url).href)});
-    const c = new C({ wallet: null, privateKey: null });
-    c.wsUrl = 'ws://127.0.0.1:${port}';
-    c.connect().then(() => process.exit(4), () => process.exit(0));
-    setTimeout(() => process.exit(3), 15000);`;
-  const run = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 20000 });
-  assert.match(run.stderr, /WebSocket error/);
-  assert.equal(run.status, 0, run.stderr);
-});
-
-test('after an outage the reconnected socket is not killed by the pong clock of the old one', async () => {
-  const c = new HyperliquidConnector({ wallet: null, privateKey: null, pingInterval: 20, pongTimeout: 1000 });
-  let terminated = false;
-  c.connected = true;
-  c.ws = { send: () => {}, terminate: () => { terminated = true; } };
-  c.lastPongReceived = Date.now() - 5 * 60000;  // last pong before a 5-minute outage
-  c.startHealthMonitoring();                    // what the 'open' handler of the new socket does
-  await new Promise(resolve => setTimeout(resolve, 60));
-  c.stopHealthMonitoring();
-  assert.equal(terminated, false);
 });
 
 test('book freshness: a host clock lagging the exchange (Docker/WSL2 after sleep) does not block orders; old data does', async () => {
