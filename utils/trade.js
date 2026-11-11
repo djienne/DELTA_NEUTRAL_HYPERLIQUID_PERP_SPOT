@@ -1,6 +1,6 @@
 import { perpToSpot } from './symbols.js';
 import { setLeverageTo1x } from './leverage.js';
-import { getKnownFee, getSizeMismatchPercent, getOrderFees, normalizeOrderOutcome } from './order-fill.js';
+import { getKnownFee, getSizeMismatchPercent, getOrderFees, normalizeOrderOutcome, assertCompleteFill } from './order-fill.js';
 import { getMaxOpenHedgeMismatchPercent, getMinFillRatio, getTakerFees, getMaxBidAskSpreadPercent } from './risk.js';
 import { getPerpPositions, getSpotBalances, executableSize, formatPrice } from './positions.js';
 
@@ -31,6 +31,28 @@ async function getOpenExposure(hyperliquid, perpSymbol, spotSymbol) {
       size: spotBalance.total
     } : null
   };
+}
+
+// Executable size of a leg at its fresh book mid; 0 below the $10 minimum or one lot (see executableSize).
+export async function legSize(hyperliquid, symbol, isSpot, size) {
+  const id = await hyperliquid.getAssetId(symbol, isSpot);
+  const book = await hyperliquid.getFreshBidAsk(hyperliquid.getCoinForOrderbook(symbol, id));
+  return executableSize(hyperliquid, symbol, isSpot, size, book.mid);
+}
+
+// The one place for order defaults: IOC at the configured slippage, size rounded down, reduceOnly only on the perp.
+export async function sendLeg(hyperliquid, config, symbol, side, size, isSpot, reduceOnly = false) {
+  return hyperliquid.createMarketOrder(symbol, side, size, {
+    isSpot, reduceOnly: reduceOnly && !isSpot, slippage: config.trading?.maxSlippagePercent ?? 5, sizeRoundingMode: 'down'
+  });
+}
+
+// Size, send, and require a complete fill (an unknown outcome throws UnknownOrderOutcomeError). null: below the minimum.
+export async function placeLeg(hyperliquid, config, symbol, side, size, isSpot, reduceOnly = false) {
+  const executable = await legSize(hyperliquid, symbol, isSpot, size);
+  if (!executable) return null;
+  const result = await sendLeg(hyperliquid, config, symbol, side, executable, isSpot, reduceOnly);
+  return assertCompleteFill(result, executable, { minFillRatio: getMinFillRatio(config) });  // its .result is the reply
 }
 
 function closeSideForPerpPosition(perpPosition) {
@@ -178,19 +200,8 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
   }
 
   const [perpSettled, spotSettled] = await Promise.allSettled([
-    // SHORT PERP (sell)
-    hyperliquid.createMarketOrder(perpSymbol, 'sell', perpSizeRounded, {
-      isSpot: false,
-      slippage: config.trading.maxSlippagePercent,
-      sizeRoundingMode: 'down'
-    }),
-
-    // LONG SPOT (buy)
-    hyperliquid.createMarketOrder(spotSymbol, 'buy', spotSizeRounded, {
-      isSpot: true,
-      slippage: config.trading.maxSlippagePercent,
-      sizeRoundingMode: 'down'
-    })
+    sendLeg(hyperliquid, config, perpSymbol, 'sell', perpSizeRounded, false),  // SHORT PERP
+    sendLeg(hyperliquid, config, spotSymbol, 'buy', spotSizeRounded, true)     // LONG SPOT
   ]);
 
   // Verify both orders filled enough to be a managed hedge.
@@ -343,9 +354,7 @@ export async function closeDeltaNeutralPosition(hyperliquid, position, config, o
       const p = current[leg];
       if (!p?.size) continue;
       const isSpot = leg === 'spot';
-      const id = await hyperliquid.getAssetId(p.symbol, isSpot);
-      const book = await hyperliquid.getFreshBidAsk(hyperliquid.getCoinForOrderbook(p.symbol, id));
-      const size = await executableSize(hyperliquid, p.symbol, isSpot, p.size, book.mid);
+      const size = await legSize(hyperliquid, p.symbol, isSpot, p.size);
       if (size) orders.push({ leg, symbol: p.symbol, size, isSpot, side: isSpot ? 'sell' : closeSideForPerpPosition(p) });
     }
     return orders;
@@ -355,9 +364,7 @@ export async function closeDeltaNeutralPosition(hyperliquid, position, config, o
   for (let pass = 0; pass < 2; pass++) {
     const orders = await ordersFor(exposure);
     if (!orders.length) break;
-    const settled = await Promise.allSettled(orders.map(o => hyperliquid.createMarketOrder(o.symbol, o.side, o.size, {
-      isSpot: o.isSpot, reduceOnly: !o.isSpot, slippage: config.trading.maxSlippagePercent, sizeRoundingMode: 'down'
-    })));
+    const settled = await Promise.allSettled(orders.map(o => sendLeg(hyperliquid, config, o.symbol, o.side, o.size, o.isSpot, true)));
     settled.forEach((result, i) => {
       const total = fills[orders[i].leg];
       if (result.status === 'rejected') { accountingComplete = false; return; }

@@ -1,8 +1,8 @@
 import { perpToSpot, spotToPerp } from './symbols.js';
 import { getPerpPositions, getSpotBalances, analyzeDeltaNeutral, executableSize } from './positions.js';
-import { assertCompleteFill } from './order-fill.js';
-import { getMinFillRatio, getMaxHedgeMismatchPercent, getTakerFees } from './risk.js';
+import { getMaxHedgeMismatchPercent, getTakerFees } from './risk.js';
 import { setLeverageTo1x } from './leverage.js';
+import { placeLeg } from './trade.js';
 
 // Inspect the whole managed account. Keep subminimum inventory visible, but never submit it alone.
 export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
@@ -81,18 +81,12 @@ export async function createHedge(hyperliquid, need, config, { verbose = false }
     const isSpot = need.targetMarket === 'SPOT';
     // A recovery short has exactly the same margin requirement as a normal opening short.
     if (!isSpot) await setLeverageTo1x(hyperliquid, need.targetSymbol, false);
-    const id = await hyperliquid.getAssetId(need.targetSymbol, isSpot);
-    const book = await hyperliquid.getFreshBidAsk(hyperliquid.getCoinForOrderbook(need.targetSymbol, id));
     // A spot buy pays its fee in the token: gross the gap up so the net received closes it
     const wanted = isSpot && need.targetSide === 'buy' ? need.targetSize / (1 - getTakerFees(config).spot) : need.targetSize;
-    const size = await executableSize(hyperliquid, need.targetSymbol, isSpot, wanted, book.mid);
-    if (!size) return { success: false, dust: true, error: 'Hedge difference below executable minimum', hedgeNeed: need };
-    const result = await hyperliquid.createMarketOrder(need.targetSymbol, need.targetSide, size, {
-      isSpot, reduceOnly: false, slippage: config.trading?.maxSlippagePercent ?? 5, sizeRoundingMode: 'down'
-    });
-    const fill = assertCompleteFill(result, size, { minFillRatio: getMinFillRatio(config) });
+    const fill = await placeLeg(hyperliquid, config, need.targetSymbol, need.targetSide, wanted, isSpot);
+    if (!fill) return { success: false, dust: true, error: 'Hedge difference below executable minimum', hedgeNeed: need };
     if (verbose) console.log(`[Hedge] ${need.targetSymbol}: ${fill.fillSize} @ ${fill.fillPrice}`);
-    return { success: true, hedgeNeed: need, fillPrice: fill.fillPrice, fillSize: fill.fillSize, result };
+    return { success: true, hedgeNeed: need, fillPrice: fill.fillPrice, fillSize: fill.fillSize, result: fill.result };
   } catch (error) {
     return { success: false, error: error.message, unknown: error.isUnknownOrderOutcome === true, hedgeNeed: need };
   }
@@ -117,15 +111,10 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
       const remaining = snapshot.hedgeNeeds.find(n => n.perpSymbol === need.perpSymbol);
       if (!remaining) continue;
       try {
-        const isSpot = remaining.fallbackCloseMarket === 'SPOT';
-        const id = await hyperliquid.getAssetId(remaining.fallbackCloseSymbol, isSpot);
-        const book = await hyperliquid.getFreshBidAsk(hyperliquid.getCoinForOrderbook(remaining.fallbackCloseSymbol, id));
-        const size = await executableSize(hyperliquid, remaining.fallbackCloseSymbol, isSpot, remaining.fallbackCloseSize, book.mid);
-        if (!size) continue;
-        const close = await hyperliquid.createMarketOrder(remaining.fallbackCloseSymbol, remaining.fallbackCloseSide, size,
-          { isSpot, reduceOnly: !isSpot, slippage: config.trading?.maxSlippagePercent ?? 5, sizeRoundingMode: 'down' });
-        assertCompleteFill(close, size, { minFillRatio: getMinFillRatio(config) });
-        results.closed.push({ hedgeNeed: remaining, result: close });
+        const close = await placeLeg(hyperliquid, config, remaining.fallbackCloseSymbol, remaining.fallbackCloseSide,
+          remaining.fallbackCloseSize, remaining.fallbackCloseMarket === 'SPOT', true);
+        if (!close) continue;
+        results.closed.push({ hedgeNeed: remaining, result: close.result });
       } catch (error) {
         console.error(`[Hedge] ${remaining.perpSymbol}: fallback close failed: ${error.message}`);
         results.failed.push({ hedgeNeed: remaining, error: error.message });

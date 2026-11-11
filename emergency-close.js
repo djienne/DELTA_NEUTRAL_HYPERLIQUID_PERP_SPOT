@@ -1,6 +1,6 @@
 import HyperliquidConnector from './hyperliquid.js';
 import { getPerpPositions, getSpotBalances, MIN_NOTIONAL_USD, formatPrice } from './utils/positions.js';
-import { assertCompleteFill } from './utils/order-fill.js';
+import { placeLeg } from './utils/trade.js';
 import fs from 'fs';
 
 /**
@@ -25,7 +25,7 @@ if (process.env.PAPER_TRADING === '1') {
 
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
 
-async function closePosition(hyperliquid, position, type, priceMap) {
+async function closePosition(hyperliquid, position, type) {
   const symbol = position.symbol;
   const size = Math.abs(type === 'PERP' ? position.sizeRaw : position.total);
 
@@ -42,41 +42,9 @@ async function closePosition(hyperliquid, position, type, priceMap) {
   try {
     console.log(`[${type}] Closing ${symbol}: ${closeSide.toUpperCase()} ${size.toFixed(6)}...`);
 
-    // Get price for this symbol
-    let price;
-    if (isSpot) {
-      const assetId = await hyperliquid.getAssetId(symbol, true);
-      const spotCoin = hyperliquid.getCoinForOrderbook(symbol, assetId);
-      price = priceMap[spotCoin];
-    } else {
-      price = priceMap[symbol];
-    }
-
-    if (!price) {
-      throw new Error(`No price data available for ${symbol}`);
-    }
-
-    // Get asset info for proper rounding
-    const assetId = await hyperliquid.getAssetId(symbol, isSpot);
-    const assetInfo = hyperliquid.getAssetInfo(symbol, assetId);
-    const sizeRounded = parseFloat(hyperliquid.roundSize(size, assetInfo.szDecimals, 'down'));
-    const roundedNotional = sizeRounded * price;
-    if (roundedNotional < MIN_NOTIONAL_USD) {
-      throw new Error(`Rounded order notional ($${roundedNotional.toFixed(2)}) is below minimum ($${MIN_NOTIONAL_USD})`);
-    }
-
-    const result = await hyperliquid.createMarketOrder(symbol, closeSide, sizeRounded, {
-      isSpot: isSpot,
-      reduceOnly: isSpot ? false : true, // reduceOnly only works for PERP
-      slippage: config.trading.maxSlippagePercent,
-      sizeRoundingMode: 'down'
-    });
-
-    const outcome = assertCompleteFill(result, sizeRounded, {
-      minFillRatio: config.risk?.minFillRatio || 0.999,
-      fallbackPrice: price,
-      context: { emergencyClose: true, symbol, type }
-    });
+    // Sized at the fresh book mid, reduce-only on the perp, complete fill required (utils/trade.js placeLeg)
+    const outcome = await placeLeg(hyperliquid, config, symbol, closeSide, size, isSpot, true);
+    if (!outcome) throw new Error(`Rounded order notional is below minimum ($${MIN_NOTIONAL_USD})`);
     console.log(`[${type}] ✅ ${symbol} closed: ${outcome.fillSize} @ $${formatPrice(outcome.fillPrice)}`);
     return { success: true, symbol, type, size: outcome.fillSize, price: outcome.fillPrice };
   } catch (err) {
@@ -115,16 +83,6 @@ async function main() {
   console.log(`Found ${perpPositions.length} PERP position(s) and ${spotBalances.length} SPOT balance(s)`);
   console.log();
 
-  // Fetch current prices
-  console.log('Fetching current prices...');
-  const allMids = await hyperliquid.getAllMids();
-  const priceMap = {};
-  for (const [symbol, priceStr] of Object.entries(allMids)) {
-    priceMap[symbol] = parseFloat(priceStr);
-  }
-  console.log(`✅ Fetched prices for ${Object.keys(priceMap).length} symbols`);
-  console.log();
-
   // positions.js already drops exposure below MIN_NOTIONAL_USD (untradeable dust)
   const perpToClose = perpPositions;
   const spotToClose = spotBalances;
@@ -148,12 +106,12 @@ async function main() {
 
   // Add PERP closes
   for (const position of perpToClose) {
-    closePromises.push(closePosition(hyperliquid, position, 'PERP', priceMap));
+    closePromises.push(closePosition(hyperliquid, position, 'PERP'));
   }
 
   // Add SPOT closes
   for (const balance of spotToClose) {
-    closePromises.push(closePosition(hyperliquid, balance, 'SPOT', priceMap));
+    closePromises.push(closePosition(hyperliquid, balance, 'SPOT'));
   }
 
   // Execute all closes in parallel
