@@ -233,8 +233,7 @@ class HyperliquidConnector extends EventEmitter {
   }
 
   buildL2BookPayload(coin, options = {}) {
-    const normalizedOptions = typeof options === 'number' ? { nSigFigs: options } : options;
-    const { nSigFigs = 5, mantissa } = normalizedOptions;
+    const { nSigFigs = 5 } = options;
     const payload = {
       type: 'l2Book',
       coin
@@ -242,16 +241,6 @@ class HyperliquidConnector extends EventEmitter {
 
     if (nSigFigs !== null && nSigFigs !== undefined) {
       payload.nSigFigs = nSigFigs;
-    }
-
-    if (mantissa !== null && mantissa !== undefined) {
-      if (nSigFigs !== 5) {
-        throw new Error('l2Book mantissa is only valid when nSigFigs is 5');
-      }
-      if (![1, 2, 5].includes(mantissa)) {
-        throw new Error('l2Book mantissa must be one of 1, 2, or 5');
-      }
-      payload.mantissa = mantissa;
     }
 
     return payload;
@@ -939,27 +928,17 @@ class HyperliquidConnector extends EventEmitter {
     this.pendingRequests.clear();
   }
   /**
-   * Get asset metadata (to find asset IDs and szDecimals)
+   * Get asset metadata (to find asset IDs and szDecimals), fetched once
    */
   async getMeta() {
-    try {
-      return await this.infoRequest({ type: 'meta' }, 20);
-    } catch (error) {
-      console.error('[Hyperliquid] Error fetching meta:', error.message);
-      throw error;
-    }
+    return this.metaCache ??= await this.infoRequest({ type: 'meta' }, 20);
   }
 
   /**
-   * Get spot metadata
+   * Get spot metadata, fetched once
    */
   async getSpotMeta() {
-    try {
-      return await this.infoRequest({ type: 'spotMeta' }, 20);
-    } catch (error) {
-      console.error('[Hyperliquid] Error fetching spot meta:', error.message);
-      throw error;
-    }
+    return this.spotMetaCache ??= await this.infoRequest({ type: 'spotMeta' }, 20);
   }
 
   /**
@@ -967,13 +946,8 @@ class HyperliquidConnector extends EventEmitter {
    * Returns assetId for perp or 10000 + index for spot
    */
   async getAssetId(coin, isSpot = false) {
-    // Load both meta caches if not loaded
-    if (!this.metaCache) {
-      this.metaCache = await this.getMeta();
-    }
-    if (!this.spotMetaCache) {
-      this.spotMetaCache = await this.getSpotMeta();
-    }
+    await this.getMeta();
+    await this.getSpotMeta();
 
     // Try perp first if not explicitly spot
     if (!isSpot) {
@@ -1260,14 +1234,6 @@ class HyperliquidConnector extends EventEmitter {
     return ethers.getAddress(vaultAddress);
   }
 
-  validateCloid(cloid) {
-    if (typeof cloid !== 'string' || !/^0x[0-9a-fA-F]{32}$/.test(cloid)) {
-      throw new Error('cloid must be a 16-byte hex string with 0x prefix');
-    }
-
-    return cloid;
-  }
-
   /**
    * Sign an action using EIP-712
    * Based on Hyperliquid Python SDK sign_l1_action
@@ -1392,7 +1358,7 @@ class HyperliquidConnector extends EventEmitter {
    * @param {string} coin - Coin symbol (e.g., 'SOL', 'BTC')
    * @param {string} side - 'buy' or 'sell'
    * @param {number} size - Order size
-   * @param {object} options - Additional options (slippage, reduceOnly, cloid, vaultAddress)
+   * @param {object} options - isSpot, slippage (percent), reduceOnly, sizeRoundingMode
    * @returns {Promise<object>} Order result
    */
   async createMarketOrder(coin, side, size, options = {}) {
@@ -1410,15 +1376,13 @@ class HyperliquidConnector extends EventEmitter {
 
     const isBuy = side === 'buy';
     const reduceOnly = isSpot ? false : (options.reduceOnly || false);
-    const slippagePercent = options.slippagePercent !== undefined
-      ? options.slippagePercent
-      : (options.slippage !== undefined ? options.slippage : 5);
+    const slippagePercent = options.slippage ?? 5;
     const slippageDecimal = this.normalizeSlippagePercent(slippagePercent);
 
     if (options.overrideMidPrice !== undefined) {
       throw new Error('overrideMidPrice is unsupported; orders require a fresh orderbook');
     }
-    const bidAsk = await this.getFreshBidAsk(orderbookCoin, { maxAgeMs: options.maxOrderbookAgeMs ?? this.maxOrderbookAgeMs });
+    const bidAsk = await this.getFreshBidAsk(orderbookCoin);
     const midPrice = (bidAsk.bid + bidAsk.ask) / 2;
 
     // Calculate limit price with slippage (matching Python SDK logic):
@@ -1450,7 +1414,8 @@ class HyperliquidConnector extends EventEmitter {
     console.log(`[Hyperliquid] Market order ${side} ${sizeStr} ${coin} at limit ${limitPriceStr} (mid: ${midPrice.toFixed(6)}, notional: $${notional.toFixed(2)}, slippage: ${slippagePercent}%, szDecimals: ${assetInfo.szDecimals})`);
     console.log(`[Hyperliquid] Price calculation: ${midPrice} * ${1 + (isBuy ? slippageDecimal : -slippageDecimal)} = ${limitPrice} -> rounded: ${limitPriceStr}`);
 
-    // Construct order
+    // Construct order (the cloid identifies it if its outcome is unknown)
+    const cloid = this.generateCloid();
     const order = {
       a: assetId,          // asset
       b: isBuy,            // is buy
@@ -1461,13 +1426,9 @@ class HyperliquidConnector extends EventEmitter {
         limit: {
           tif: 'Ioc'  // Immediate or Cancel - executes immediately at market price
         }
-      }
+      },
+      c: cloid
     };
-
-    const cloid = options.cloid === false ? null : this.validateCloid(options.cloid || this.generateCloid());
-    if (cloid) {
-      order.c = cloid;
-    }
 
     const action = {
       type: 'order',
@@ -1489,10 +1450,10 @@ class HyperliquidConnector extends EventEmitter {
     };
 
     // Try WebSocket first if connected, otherwise use REST
-    if (this.connected && !options.useRest && !this.marketDataHub) {
-      return await this.createOrderWebSocket(action, nonce, options.vaultAddress ?? this.vaultAddress, options.expiresAfter, orderContext);
+    if (this.connected && !this.marketDataHub) {
+      return await this.createOrderWebSocket(action, nonce, this.vaultAddress, options.expiresAfter, orderContext);
     } else {
-      return await this.createOrderRest(action, nonce, options.vaultAddress ?? this.vaultAddress, options.expiresAfter, orderContext);
+      return await this.createOrderRest(action, nonce, this.vaultAddress, options.expiresAfter, orderContext);
     }
   }
 

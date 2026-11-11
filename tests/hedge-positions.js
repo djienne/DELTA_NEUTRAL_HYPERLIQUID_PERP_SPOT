@@ -34,7 +34,6 @@ async function main() {
     console.log();
 
     const analysis = await analyzeHedgeNeeds(hyperliquid, {
-      minValueUSD: 1,
       verbose: true
     });
 
@@ -54,7 +53,6 @@ async function main() {
 
     // First show what will be done
     const analysis = await analyzeHedgeNeeds(hyperliquid, {
-      minValueUSD: 1,
       verbose: false
     });
 
@@ -77,7 +75,6 @@ async function main() {
     // Execute
     const results = await autoHedgeAll(hyperliquid, config, {
       verbose: true,
-      minValueUSD: 1,
       fallbackToClose: true
     });
 

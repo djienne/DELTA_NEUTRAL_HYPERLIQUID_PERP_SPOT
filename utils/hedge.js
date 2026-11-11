@@ -48,12 +48,10 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
       dust.push({ symbol: targetSymbol, size, isSpot, valueUSD: size * price, reason: 'hedge difference below executable minimum' });
       return;
     }
-    hedgeNeeds.push({ type, perpSymbol, spotSymbol, targetSymbol: targetMarket ? targetSymbol : null,
-      targetMarket, targetSide, targetSize: quantity, currentPrice: price, valueUSD: quantity * price,
-      perpSizeNeeded: targetMarket === 'PERP' ? quantity : undefined,
-      spotSizeNeeded: isSpot ? quantity : undefined,
+    hedgeNeeds.push({ type, perpSymbol, targetSymbol: targetMarket ? targetSymbol : null,
+      targetMarket, targetSide, targetSize: quantity, valueUSD: quantity * price,
       fallbackCloseSymbol, fallbackCloseMarket: fallbackMarket, fallbackCloseSide: fallbackSide,
-      fallbackCloseSize: size, fallbackCloseReduceOnly: fallbackMarket === 'PERP',
+      fallbackCloseSize: size,
       action: targetSide?.toUpperCase() ?? 'CLOSE', market: targetMarket ?? fallbackMarket, reason: type });
   }
   for (const pair of analysis.imbalancedPairs) {
@@ -72,8 +70,7 @@ export async function analyzeHedgeNeeds(hyperliquid, options = {}) {
   for (const p of analysis.unmatchedSpot) {
     await add(HyperliquidConnector.spotToPerp(p.symbol), p.balance.total, 'PERP', 'sell', 'SPOT', 'sell', 'SPOT_NEEDS_PERP_SHORT');
   }
-  return { analysis, hedgeNeeds, dust, symbols: [...active], needsHedging: hedgeNeeds.length > 0,
-    hasDeltaNeutralPairs: analysis.deltaNeutralPairs.length > 0 };
+  return { analysis, hedgeNeeds, dust, symbols: [...active], needsHedging: hedgeNeeds.length > 0 };
 }
 
 export async function createHedge(hyperliquid, need, config, { verbose = false } = {}) {
@@ -104,7 +101,7 @@ export async function createHedge(hyperliquid, need, config, { verbose = false }
 export async function autoHedgeAll(hyperliquid, config, options = {}) {
   const scope = { ...options, maxHedgeMismatchPercent: options.maxHedgeMismatchPercent ?? getMaxHedgeMismatchPercent(config) };
   let snapshot = await analyzeHedgeNeeds(hyperliquid, scope);
-  const results = { hedged: [], closed: [], failed: [], skipped: [], totalProcessed: 0 };
+  const results = { hedged: [], closed: [], failed: [], totalProcessed: 0 };
   // The bot holds one pair. Choosing ownership among multiple pairs requires the operator.
   if (snapshot.symbols.length > 1) {
     return { ...results, success: false, postAnalysis: snapshot, failed: [{ error: 'Multiple managed pairs require manual resolution' }] };
@@ -123,7 +120,7 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
         const id = await hyperliquid.getAssetId(remaining.fallbackCloseSymbol, isSpot);
         const book = await hyperliquid.getFreshBidAsk(hyperliquid.getCoinForOrderbook(remaining.fallbackCloseSymbol, id));
         const size = await executableSize(hyperliquid, remaining.fallbackCloseSymbol, isSpot, remaining.fallbackCloseSize, book.mid);
-        if (!size) { results.skipped.push(remaining); continue; }
+        if (!size) continue;
         const close = await hyperliquid.createMarketOrder(remaining.fallbackCloseSymbol, remaining.fallbackCloseSide, size,
           { isSpot, reduceOnly: !isSpot, slippage: config.trading?.maxSlippagePercent ?? 5, sizeRoundingMode: 'down' });
         assertCompleteFill(close, size, { minFillRatio: getMinFillRatio(config) });

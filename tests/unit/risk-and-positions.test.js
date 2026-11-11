@@ -14,8 +14,6 @@ import { checkBalanceDistribution } from '../../utils/balance.js';
 
 test('maxSpreadPercent is the preferred bid-ask spread threshold key', () => {
   assert.equal(getMaxBidAskSpreadPercent({ maxSpreadPercent: 0.25 }), 0.25);
-  assert.equal(getMaxBidAskSpreadPercent({ maxBidAskSpreadPercent: 0.2 }), 0.2);
-  assert.equal(getMaxBidAskSpreadPercent({ maxSpreadPercent: 0.25, maxBidAskSpreadPercent: 0.2 }), 0.25);
   assert.equal(getMaxBidAskSpreadPercent({}), 0.15);
 });
 

@@ -1,5 +1,5 @@
 import HyperliquidConnector from './hyperliquid.js';
-import { loadState, saveState, hasPosition, getCurrentPosition, recordPosition, closePosition as closePositionState, updateCheckTime, canClosePosition, getPositionAge, formatPosition, getHistoryStats, setPendingIntent, clearPendingIntent, getStateFilePath, writeJsonAtomic } from './utils/state.js';
+import { loadState, saveState, hasPosition, getCurrentPosition, recordPosition, closePosition as closePositionState, canClosePosition, getPositionAge, formatPosition, getHistoryStats, setPendingIntent, clearPendingIntent, getStateFilePath, writeJsonAtomic } from './utils/state.js';
 import { checkAndReportBalances } from './utils/balance.js';
 import { findBestOpportunities } from './utils/opportunity.js';
 import { openDeltaNeutralPosition, closeDeltaNeutralPosition } from './utils/trade.js';
@@ -444,10 +444,6 @@ async function runCycle() {
           }
           console.log(`${timestamp()} [5/6] Holding current position${action ? ' (within minimum hold)' : ''}`);
         }
-
-        // Update check time
-        state = updateCheckTime(state);
-        saveState(state);
 
         console.log(`${timestamp()} [6/6] Next check in 1 hour`);
         console.log();
@@ -1023,4 +1019,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   });
 }
 
-export { timestamp, verifyPositionOnChain, reconcilePendingIntent, runCycle, closeAndReopen, displayStatus };
+export { timestamp, verifyPositionOnChain, reconcilePendingIntent };

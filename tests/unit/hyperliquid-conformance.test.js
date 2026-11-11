@@ -79,7 +79,7 @@ function expectedConnectionId(action, nonce, vaultAddress = null, expiresAfter =
   return ethers.keccak256(new Uint8Array(bytes));
 }
 
-test('l2Book payload omits out-of-spec mantissa null', () => {
+test('l2Book payload defaults to 5 significant figures', () => {
   const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
 
   assert.deepEqual(connector.buildL2BookPayload('BTC'), {
@@ -87,22 +87,6 @@ test('l2Book payload omits out-of-spec mantissa null', () => {
     coin: 'BTC',
     nSigFigs: 5
   });
-
-  assert.deepEqual(connector.buildL2BookPayload('BTC', { mantissa: 2 }), {
-    type: 'l2Book',
-    coin: 'BTC',
-    nSigFigs: 5,
-    mantissa: 2
-  });
-
-  assert.throws(
-    () => connector.buildL2BookPayload('BTC', { nSigFigs: 4, mantissa: 2 }),
-    /mantissa is only valid/
-  );
-  assert.throws(
-    () => connector.buildL2BookPayload('BTC', { mantissa: 3 }),
-    /must be one of/
-  );
 });
 
 test('subscription lifecycle sends documented l2Book frames', async () => {
@@ -213,12 +197,7 @@ test('connection id includes vault address bytes and expiresAfter separator', as
   );
 });
 
-test('order helpers validate cloid and forward expiresAfter', async () => {
-  assert.throws(
-    () => new HyperliquidConnector({ wallet: '0x0', privateKey: null }).validateCloid('abc'),
-    /cloid must be/
-  );
-
+test('REST orders forward vaultAddress and expiresAfter', async () => {
   const payloads = [];
   const connector = new HyperliquidConnector({
     wallet: '0x0000000000000000000000000000000000000001',
@@ -233,11 +212,6 @@ test('order helpers validate cloid and forward expiresAfter', async () => {
   });
   const action = { type: 'order', orders: [], grouping: 'na' };
   const vaultAddress = '0x00000000000000000000000000000000000000ab';
-
-  assert.equal(
-    connector.validateCloid('0x0123456789abcdef0123456789abcdef'),
-    '0x0123456789abcdef0123456789abcdef'
-  );
 
   await connector.createOrderRest(action, 123, vaultAddress, 456);
 
@@ -385,7 +359,7 @@ test('createMarketOrder refreshes stale orderbook before pricing', async () => {
     };
   };
 
-  const action = await connector.createMarketOrder('BTC', 'buy', 1, { useRest: true, cloid: false });
+  const action = await connector.createMarketOrder('BTC', 'buy', 1);
 
   assert.equal(refreshed, true);
   assert.equal(action.orders[0].p, '105');

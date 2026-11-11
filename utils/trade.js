@@ -11,10 +11,6 @@ import { getPerpPositions, getSpotBalances, executableSize, formatPrice } from '
  * Position sizing is based on minimum order size requirements (minOrderSizeUSD).
  */
 
-function normalizeSettledOrder(settled, options = {}) {
-  return normalizeOrderOutcome(settled, options);
-}
-
 async function getOpenExposure(hyperliquid, perpSymbol, spotSymbol) {
   const [perpPositions, spotBalances] = await Promise.all([
     getPerpPositions(hyperliquid, null, { verbose: false, includeDust: true }),
@@ -181,146 +177,140 @@ export async function openDeltaNeutralPosition(hyperliquid, opportunity, balance
     console.log('[Trade] Executing orders in parallel...');
   }
 
-  try {
-    const [perpSettled, spotSettled] = await Promise.allSettled([
-      // SHORT PERP (sell)
-      hyperliquid.createMarketOrder(perpSymbol, 'sell', perpSizeRounded, {
-        isSpot: false,
-        slippage: config.trading.maxSlippagePercent,
-        sizeRoundingMode: 'down'
-      }),
+  const [perpSettled, spotSettled] = await Promise.allSettled([
+    // SHORT PERP (sell)
+    hyperliquid.createMarketOrder(perpSymbol, 'sell', perpSizeRounded, {
+      isSpot: false,
+      slippage: config.trading.maxSlippagePercent,
+      sizeRoundingMode: 'down'
+    }),
 
-      // LONG SPOT (buy)
-      hyperliquid.createMarketOrder(spotSymbol, 'buy', spotSizeRounded, {
-        isSpot: true,
-        slippage: config.trading.maxSlippagePercent,
-        sizeRoundingMode: 'down'
-      })
-    ]);
+    // LONG SPOT (buy)
+    hyperliquid.createMarketOrder(spotSymbol, 'buy', spotSizeRounded, {
+      isSpot: true,
+      slippage: config.trading.maxSlippagePercent,
+      sizeRoundingMode: 'down'
+    })
+  ]);
 
-    // Verify both orders filled enough to be a managed hedge.
-    const minFillRatio = getMinFillRatio(config);
-    const perpOutcome = normalizeSettledOrder(perpSettled, {
-      requestedSize: perpSizeRounded,
-      minFillRatio,
-      fallbackPrice: perpMid,
-      context: { symbol: perpSymbol, side: 'sell', isSpot: false, phase: 'open' }
-    });
-    const spotOutcome = normalizeSettledOrder(spotSettled, {
-      requestedSize: spotSizeRounded,
-      minFillRatio,
-      fallbackPrice: spotMid,
-      context: { symbol: spotSymbol, side: 'buy', isSpot: true, phase: 'open' }
-    });
-    const perpResult = perpOutcome.result;
-    const spotResult = spotOutcome.result;
-    const perpFilled = perpOutcome.isCompleteFill ? perpOutcome.filled : null;
-    const spotFilled = spotOutcome.isCompleteFill ? spotOutcome.filled : null;
-    const perpError = perpOutcome.error;
-    const spotError = spotOutcome.error;
-    let perpFillSzActual = perpOutcome.fillSize || 0;
-    let spotFillSzActual = spotOutcome.fillSize || 0;
+  // Verify both orders filled enough to be a managed hedge.
+  const minFillRatio = getMinFillRatio(config);
+  const perpOutcome = normalizeOrderOutcome(perpSettled, {
+    requestedSize: perpSizeRounded,
+    minFillRatio,
+    fallbackPrice: perpMid,
+    context: { symbol: perpSymbol, side: 'sell', isSpot: false, phase: 'open' }
+  });
+  const spotOutcome = normalizeOrderOutcome(spotSettled, {
+    requestedSize: spotSizeRounded,
+    minFillRatio,
+    fallbackPrice: spotMid,
+    context: { symbol: spotSymbol, side: 'buy', isSpot: true, phase: 'open' }
+  });
+  const perpResult = perpOutcome.result;
+  const spotResult = spotOutcome.result;
+  const perpFilled = perpOutcome.isCompleteFill ? perpOutcome.filled : null;
+  const spotFilled = spotOutcome.isCompleteFill ? spotOutcome.filled : null;
+  const perpError = perpOutcome.error;
+  const spotError = spotOutcome.error;
+  let perpFillSzActual = perpOutcome.fillSize || 0;
+  let spotFillSzActual = spotOutcome.fillSize || 0;
 
-    if (perpOutcome.rejected || spotOutcome.rejected) {
-      try {
-        const exposure = await getOpenExposure(hyperliquid, perpSymbol, spotSymbol);
-        if (perpOutcome.rejected && exposure.perp?.size > 0) {
-          perpFillSzActual = exposure.perp.size;
-        }
-        if (spotOutcome.rejected && exposure.spot?.size > 0) {
-          spotFillSzActual = exposure.spot.size;
-        }
-      } catch (reconcileError) {
-        console.error('[Trade] ⚠️  Could not reconcile rejected order on-chain:', reconcileError.message);
+  if (perpOutcome.rejected || spotOutcome.rejected) {
+    try {
+      const exposure = await getOpenExposure(hyperliquid, perpSymbol, spotSymbol);
+      if (perpOutcome.rejected && exposure.perp?.size > 0) {
+        perpFillSzActual = exposure.perp.size;
       }
-    }
-
-    // Handle partial fills - need to cleanup if only one succeeded
-    if (!perpFilled && !spotFilled) {
-      if (perpFillSzActual > 0 || spotFillSzActual > 0) {
-        const cleanupErrors = await cleanupOpenExposure(hyperliquid, perpSymbol, spotSymbol, config);
-
-        if (cleanupErrors.length > 0) {
-          throw new Error(`Both open orders failed or were unknown, and cleanup failed. MANUAL ACTION REQUIRED. ${cleanupErrors.join('; ')}`);
-        }
+      if (spotOutcome.rejected && exposure.spot?.size > 0) {
+        spotFillSzActual = exposure.spot.size;
       }
-
-      throw new Error(`Open orders did not reach minimum fill ratio - ${orderFailureSummary('PERP', perpOutcome)}, ${orderFailureSummary('SPOT', spotOutcome)}`);
+    } catch (reconcileError) {
+      console.error('[Trade] ⚠️  Could not reconcile rejected order on-chain:', reconcileError.message);
     }
-
-    if (!perpFilled && spotFilled) {
-      // PERP failed or under-filled but SPOT succeeded - close all open exposure.
-      console.error('[Trade] PERP order failed or under-filled, closing open exposure...');
-      const cleanupErrors = await cleanupOpenExposure(hyperliquid, perpSymbol, spotSymbol, config);
-      if (cleanupErrors.length > 0) {
-        throw new Error(`PERP order failed or under-filled and cleanup failed. MANUAL ACTION REQUIRED. ${cleanupErrors.join('; ')}`);
-      }
-      console.log('[Trade] Open exposure closed and verified');
-      throw new Error(`PERP order failed or under-filled: ${perpError || orderFailureSummary('PERP', perpOutcome)}`);
-    }
-
-    if (perpFilled && !spotFilled) {
-      // SPOT failed or under-filled but PERP succeeded - close all open exposure.
-      console.error('[Trade] SPOT order failed or under-filled, closing open exposure...');
-      const cleanupErrors = await cleanupOpenExposure(hyperliquid, perpSymbol, spotSymbol, config);
-      if (cleanupErrors.length > 0) {
-        throw new Error(`SPOT order failed or under-filled and cleanup failed. MANUAL ACTION REQUIRED. ${cleanupErrors.join('; ')}`);
-      }
-      console.log('[Trade] Open exposure closed and verified');
-      throw new Error(`SPOT order failed or under-filled: ${spotError || orderFailureSummary('SPOT', spotOutcome)}`);
-    }
-
-    // Both filled successfully!
-    const perpFillPx = parseFloat(perpFilled.avgPx);
-    const spotFillPx = parseFloat(spotFilled.avgPx);
-    const perpFillSz = parseFloat(perpFilled.totalSz || perpSizeRounded);
-    const spotFillSz = parseFloat(spotFilled.totalSz || spotSizeRounded);
-    const maxOpenHedgeMismatchPercent = getMaxOpenHedgeMismatchPercent(config);
-    const hedgeMismatchPct = getSizeMismatchPercent(perpFillSz, spotNet(spotFillSz));
-
-    if (hedgeMismatchPct > maxOpenHedgeMismatchPercent + 1e-9) {
-      console.error('[Trade] ❌ Partial fill imbalance detected, closing filled legs...');
-      console.error(`[Trade]   PERP filled: ${perpFillSz}/${perpSizeRounded}, SPOT filled: ${spotFillSz}/${spotSizeRounded}, mismatch: ${hedgeMismatchPct.toFixed(2)}%`);
-
-      const cleanupErrors = await cleanupOpenExposure(hyperliquid, perpSymbol, spotSymbol, config);
-
-      if (cleanupErrors.length > 0) {
-        throw new Error(`Partial open cleanup failed. MANUAL ACTION REQUIRED. ${cleanupErrors.join('; ')}`);
-      }
-
-      throw new Error(`Partial open fills were imbalanced and have been closed (${hedgeMismatchPct.toFixed(2)}% mismatch)`);
-    }
-
-    if (verbose) {
-      console.log('[Trade] ✅ Both orders filled:');
-      console.log(`[Trade]   PERP: ${perpFillSz} @ $${formatPrice(perpFillPx)}`);
-      console.log(`[Trade]   SPOT: ${spotFillSz} @ $${formatPrice(spotFillPx)}`);
-    }
-
-    return {
-      success: true,
-      symbol: symbol,
-      perpSymbol: perpSymbol,
-      spotSymbol: spotSymbol,
-      perpSize: perpFillSz,
-      spotSize: Number(spotNet(spotFillSz).toPrecision(12)),  // net token balance (fee in token, dust included)
-      perpEntryPrice: Number.isFinite(perpFillPx) && perpFillPx > 0 ? perpFillPx : null,
-      spotEntryPrice: Number.isFinite(spotFillPx) && spotFillPx > 0 ? spotFillPx : null,
-      positionValue: perpFillSz * perpFillPx,
-      fundingRate: opportunity.funding.fundingRate,  // current hourly rate at open
-      annualizedFunding: opportunity.avgFundingRate,  // 7d average APY (decision basis)
-      openFeesActual: getOrderFees(perpResult, spotResult),
-      openFeesEstimated: (getKnownFee(perpResult) === null ? perpFillSz * perpFillPx * getTakerFees(config).perp : 0) +
-        (getKnownFee(spotResult) === null ? spotFillSz * spotFillPx * getTakerFees(config).spot : 0),
-      accountingComplete: Number.isFinite(perpFillPx) && perpFillPx > 0 && Number.isFinite(spotFillPx) && spotFillPx > 0,
-      perpResult: perpResult,
-      spotResult: spotResult
-    };
-
-  } catch (error) {
-    console.error('[Trade] ❌ Error opening position:', error.message);
-    throw error;
   }
+
+  // Handle partial fills - need to cleanup if only one succeeded
+  if (!perpFilled && !spotFilled) {
+    if (perpFillSzActual > 0 || spotFillSzActual > 0) {
+      const cleanupErrors = await cleanupOpenExposure(hyperliquid, perpSymbol, spotSymbol, config);
+
+      if (cleanupErrors.length > 0) {
+        throw new Error(`Both open orders failed or were unknown, and cleanup failed. MANUAL ACTION REQUIRED. ${cleanupErrors.join('; ')}`);
+      }
+    }
+
+    throw new Error(`Open orders did not reach minimum fill ratio - ${orderFailureSummary('PERP', perpOutcome)}, ${orderFailureSummary('SPOT', spotOutcome)}`);
+  }
+
+  if (!perpFilled && spotFilled) {
+    // PERP failed or under-filled but SPOT succeeded - close all open exposure.
+    console.error('[Trade] PERP order failed or under-filled, closing open exposure...');
+    const cleanupErrors = await cleanupOpenExposure(hyperliquid, perpSymbol, spotSymbol, config);
+    if (cleanupErrors.length > 0) {
+      throw new Error(`PERP order failed or under-filled and cleanup failed. MANUAL ACTION REQUIRED. ${cleanupErrors.join('; ')}`);
+    }
+    console.log('[Trade] Open exposure closed and verified');
+    throw new Error(`PERP order failed or under-filled: ${perpError || orderFailureSummary('PERP', perpOutcome)}`);
+  }
+
+  if (perpFilled && !spotFilled) {
+    // SPOT failed or under-filled but PERP succeeded - close all open exposure.
+    console.error('[Trade] SPOT order failed or under-filled, closing open exposure...');
+    const cleanupErrors = await cleanupOpenExposure(hyperliquid, perpSymbol, spotSymbol, config);
+    if (cleanupErrors.length > 0) {
+      throw new Error(`SPOT order failed or under-filled and cleanup failed. MANUAL ACTION REQUIRED. ${cleanupErrors.join('; ')}`);
+    }
+    console.log('[Trade] Open exposure closed and verified');
+    throw new Error(`SPOT order failed or under-filled: ${spotError || orderFailureSummary('SPOT', spotOutcome)}`);
+  }
+
+  // Both filled successfully!
+  const perpFillPx = parseFloat(perpFilled.avgPx);
+  const spotFillPx = parseFloat(spotFilled.avgPx);
+  const perpFillSz = parseFloat(perpFilled.totalSz || perpSizeRounded);
+  const spotFillSz = parseFloat(spotFilled.totalSz || spotSizeRounded);
+  const maxOpenHedgeMismatchPercent = getMaxOpenHedgeMismatchPercent(config);
+  const hedgeMismatchPct = getSizeMismatchPercent(perpFillSz, spotNet(spotFillSz));
+
+  if (hedgeMismatchPct > maxOpenHedgeMismatchPercent + 1e-9) {
+    console.error('[Trade] ❌ Partial fill imbalance detected, closing filled legs...');
+    console.error(`[Trade]   PERP filled: ${perpFillSz}/${perpSizeRounded}, SPOT filled: ${spotFillSz}/${spotSizeRounded}, mismatch: ${hedgeMismatchPct.toFixed(2)}%`);
+
+    const cleanupErrors = await cleanupOpenExposure(hyperliquid, perpSymbol, spotSymbol, config);
+
+    if (cleanupErrors.length > 0) {
+      throw new Error(`Partial open cleanup failed. MANUAL ACTION REQUIRED. ${cleanupErrors.join('; ')}`);
+    }
+
+    throw new Error(`Partial open fills were imbalanced and have been closed (${hedgeMismatchPct.toFixed(2)}% mismatch)`);
+  }
+
+  if (verbose) {
+    console.log('[Trade] ✅ Both orders filled:');
+    console.log(`[Trade]   PERP: ${perpFillSz} @ $${formatPrice(perpFillPx)}`);
+    console.log(`[Trade]   SPOT: ${spotFillSz} @ $${formatPrice(spotFillPx)}`);
+  }
+
+  return {
+    success: true,
+    symbol: symbol,
+    perpSymbol: perpSymbol,
+    spotSymbol: spotSymbol,
+    perpSize: perpFillSz,
+    spotSize: Number(spotNet(spotFillSz).toPrecision(12)),  // net token balance (fee in token, dust included)
+    perpEntryPrice: Number.isFinite(perpFillPx) && perpFillPx > 0 ? perpFillPx : null,
+    spotEntryPrice: Number.isFinite(spotFillPx) && spotFillPx > 0 ? spotFillPx : null,
+    positionValue: perpFillSz * perpFillPx,
+    fundingRate: opportunity.funding.fundingRate,  // current hourly rate at open
+    annualizedFunding: opportunity.avgFundingRate,  // 7d average APY (decision basis)
+    openFeesActual: getOrderFees(perpResult, spotResult),
+    openFeesEstimated: (getKnownFee(perpResult) === null ? perpFillSz * perpFillPx * getTakerFees(config).perp : 0) +
+      (getKnownFee(spotResult) === null ? spotFillSz * spotFillPx * getTakerFees(config).spot : 0),
+    accountingComplete: Number.isFinite(perpFillPx) && perpFillPx > 0 && Number.isFinite(spotFillPx) && spotFillPx > 0,
+    perpResult: perpResult,
+    spotResult: spotResult
+  };
 }
 
 /**
@@ -414,5 +404,5 @@ export async function closeDeltaNeutralPosition(hyperliquid, position, config, o
   const totalPnl = accountingComplete ? pricePnl + fundingPnl - feesActual - feesEstimated : null;
   if (verbose) console.log(`[Trade] Closed; PnL ${totalPnl === null ? 'unavailable' : totalPnl.toFixed(4)}; residual inventory ${JSON.stringify(residualInventory)}`);
   return { success: true, reason, perpClosePrice, spotClosePrice, perpPnl, spotPnl, pricePnl, fundingPnl,
-    fundingUnavailable: fundingPnl === null, feesActual, feesEstimated, accountingComplete, totalPnl, closeFills: fills, residualInventory };
+    feesActual, feesEstimated, accountingComplete, totalPnl, closeFills: fills, residualInventory };
 }

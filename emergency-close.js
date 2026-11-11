@@ -78,17 +78,8 @@ async function closePosition(hyperliquid, position, type, priceMap) {
       fallbackPrice: price,
       context: { emergencyClose: true, symbol, type }
     });
-    const error = result.response?.data?.statuses?.[0]?.error;
-
-    if (outcome.isCompleteFill) {
-      const fillPx = outcome.fillPrice;
-      const fillSz = outcome.fillSize;
-      console.log(`[${type}] ✅ ${symbol} closed: ${fillSz} @ $${formatPrice(fillPx)}`);
-      return { success: true, symbol, type, size: fillSz, price: fillPx };
-    } else {
-      console.error(`[${type}] ❌ ${symbol} failed: ${error || 'Unknown error'}`);
-      return { success: false, symbol, type, error: error || 'Unknown error' };
-    }
+    console.log(`[${type}] ✅ ${symbol} closed: ${outcome.fillSize} @ $${formatPrice(outcome.fillPrice)}`);
+    return { success: true, symbol, type, size: outcome.fillSize, price: outcome.fillPrice };
   } catch (err) {
     console.error(`[${type}] ❌ ${symbol} error: ${err.message}`);
     return { success: false, symbol, type, error: err.message };

@@ -11,7 +11,7 @@ export class SlidingWindowRateLimiter {
   getCurrentWeight() {
     this.cleanup();
     return this.requests.reduce((sum, request) => {
-      return sum + (typeof request === 'number' ? 1 : request.weight);
+      return sum + request.weight;
     }, 0);
   }
 
@@ -43,8 +43,7 @@ export class SlidingWindowRateLimiter {
   cleanup() {
     const now = Date.now();
     this.requests = this.requests.filter(request => {
-      const timestamp = typeof request === 'number' ? request : request.timestamp;
-      return now - timestamp < this.windowMs;
+      return now - request.timestamp < this.windowMs;
     });
   }
 }

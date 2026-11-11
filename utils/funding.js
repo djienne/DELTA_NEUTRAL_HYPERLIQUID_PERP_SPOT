@@ -1,5 +1,3 @@
-import HyperliquidConnector from '../hyperliquid.js';
-
 /**
  * Funding Rate Utilities
  *
@@ -23,55 +21,49 @@ import HyperliquidConnector from '../hyperliquid.js';
 export async function getAllFundingRates(hyperliquid, options = {}) {
   const { verbose = false } = options;
 
-  try {
-    if (verbose) {
-      console.log('Fetching funding rates from Hyperliquid API...');
-    }
+  if (verbose) {
+    console.log('Fetching funding rates from Hyperliquid API...');
+  }
 
-    // Fetch meta and asset context which includes funding rates
-    const data = await hyperliquid.infoRequest({
-      type: 'metaAndAssetCtxs'
-    }, 20);
+  // Fetch meta and asset context which includes funding rates
+  const data = await hyperliquid.infoRequest({
+    type: 'metaAndAssetCtxs'
+  }, 20);
 
-    // Extract funding rates from the response
-    // The structure is: data = [meta, assetCtxs]
-    // meta contains the universe of assets
-    // assetCtxs contains current context including funding rates
+  // Extract funding rates from the response
+  // The structure is: data = [meta, assetCtxs]
+  // meta contains the universe of assets
+  // assetCtxs contains current context including funding rates
 
-    const fundingMap = new Map();
+  const fundingMap = new Map();
 
-    if (data && data.length >= 2) {
-      const meta = data[0];
-      const assetCtxs = data[1];
+  if (data && data.length >= 2) {
+    const meta = data[0];
+    const assetCtxs = data[1];
 
-      // Match assets with their funding rates
-      for (let i = 0; i < meta.universe.length; i++) {
-        const asset = meta.universe[i];
-        const assetCtx = assetCtxs[i];
+    // Match assets with their funding rates
+    for (let i = 0; i < meta.universe.length; i++) {
+      const asset = meta.universe[i];
+      const assetCtx = assetCtxs[i];
 
-        if (asset && assetCtx && assetCtx.funding) {
-          fundingMap.set(asset.name, {
-            symbol: asset.name,
-            fundingRate: parseFloat(assetCtx.funding),
-            // Annualize: hourly rate × 24 hours × 365 days
-            annualizedRate: parseFloat(assetCtx.funding) * 24 * 365,
-            // Keep the raw context for additional info
-            ctx: assetCtx
-          });
-        }
+      if (asset && assetCtx && assetCtx.funding) {
+        fundingMap.set(asset.name, {
+          symbol: asset.name,
+          fundingRate: parseFloat(assetCtx.funding),
+          // Annualize: hourly rate × 24 hours × 365 days
+          annualizedRate: parseFloat(assetCtx.funding) * 24 * 365,
+          // Keep the raw context for additional info
+          ctx: assetCtx
+        });
       }
     }
-
-    if (verbose) {
-      console.log(`✅ Fetched funding rates for ${fundingMap.size} perpetual symbols`);
-    }
-
-    return fundingMap;
-
-  } catch (error) {
-    console.error('Error fetching funding rates:', error.message);
-    throw error;
   }
+
+  if (verbose) {
+    console.log(`✅ Fetched funding rates for ${fundingMap.size} perpetual symbols`);
+  }
+
+  return fundingMap;
 }
 
 /**

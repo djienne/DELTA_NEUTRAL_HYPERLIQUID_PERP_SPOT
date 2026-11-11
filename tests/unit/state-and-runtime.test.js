@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import HyperliquidConnector from '../../hyperliquid.js';
-import { getLeverageSettings } from '../../utils/leverage.js';
 import { canClosePosition, clearPendingIntent, getHistoryStats, loadState, recordPosition, closePosition, saveState, setPendingIntent } from '../../utils/state.js';
 import { timestamp } from '../../bot.js';
 
@@ -34,30 +33,6 @@ test('getBidAsk includes mid price', () => {
     askSize: 1,
     timestamp: 123
   });
-});
-
-test('getLeverageSettings handles string asset.coin values', async () => {
-  const settings = await getLeverageSettings({
-    wallet: '0x0000000000000000000000000000000000000001',
-    restUrl: 'https://example.invalid/info',
-    async infoRequest() {
-      return {
-        assetPositions: [
-          {
-            position: {
-              coin: 'BTC',
-              leverage: { value: '1', type: 'isolated' }
-            }
-          }
-        ]
-      };
-    },
-    async getMeta() {
-      return { universe: [] };
-    }
-  });
-
-  assert.deepEqual(settings, [{ symbol: 'BTC', leverage: 1, type: 'isolated' }]);
 });
 
 test('state compacts order responses and history stats use component total PnL', () => {

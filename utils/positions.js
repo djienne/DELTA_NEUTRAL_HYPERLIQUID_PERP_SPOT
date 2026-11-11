@@ -45,89 +45,65 @@ export async function getPerpPositions(hyperliquid, user = null, options = {}) {
   const { verbose = false, managedPerpSymbols = null, includeDust = false } = options;
   const managedSet = managedPerpSymbols ? new Set(managedPerpSymbols) : null;
 
-  try {
-    user = user || hyperliquid.wallet;
+  user = user || hyperliquid.wallet;
 
-    if (!user) {
-      throw new Error('User address required to fetch positions');
-    }
+  if (!user) {
+    throw new Error('User address required to fetch positions');
+  }
 
-    if (verbose) {
-      console.log(`Fetching PERP positions for ${user}...`);
-    }
+  if (verbose) {
+    console.log(`Fetching PERP positions for ${user}...`);
+  }
 
-    const data = await hyperliquid.infoRequest({
-      type: 'clearinghouseState',
-      user: user
-    }, 2);
-    if (!Array.isArray(data?.assetPositions)) throw new Error('Invalid perpetual account response');
+  const data = await hyperliquid.infoRequest({
+    type: 'clearinghouseState',
+    user: user
+  }, 2);
+  if (!Array.isArray(data?.assetPositions)) throw new Error('Invalid perpetual account response');
 
-    // Get asset metadata to map positions to symbols
-    const meta = await hyperliquid.getMeta();
+  const positions = [];
 
-    const positions = [];
+  // Process asset positions
+  if (data.assetPositions && data.assetPositions.length > 0) {
+    for (const position of data.assetPositions) {
+      const asset = position.position;
+      const symbol = asset.coin;  // a name string, not an index
+      // Parse position data
+      const size = parseFloat(asset.szi);
+      const entryPx = parseFloat(asset.entryPx || '0');
+      const positionValue = parseFloat(asset.positionValue || '0');
+      const unrealizedPnl = parseFloat(asset.unrealizedPnl || '0');
+      const returnOnEquity = parseFloat(asset.returnOnEquity || '0');
 
-    // Process asset positions
-    if (data.assetPositions && data.assetPositions.length > 0) {
-      for (const position of data.assetPositions) {
-        const asset = position.position;
-        const assetIndex = asset.coin;
+      // Determine side (positive size = long, negative = short)
+      const side = size > 0 ? 'LONG' : size < 0 ? 'SHORT' : 'NONE';
 
-        // Get symbol name from meta
-        // asset.coin can be either a numeric index or a string name
-        let assetInfo, symbol;
-        if (typeof assetIndex === 'string') {
-          // It's already the symbol name
-          symbol = assetIndex;
-          // Find the asset info by name
-          assetInfo = meta.universe.find(a => a && a.name === assetIndex);
-        } else {
-          // It's a numeric index
-          assetInfo = meta.universe[assetIndex];
-          symbol = assetInfo ? assetInfo.name : `Asset${assetIndex}`;
-        }
-
-        // Parse position data
-        const size = parseFloat(asset.szi);
-        const entryPx = parseFloat(asset.entryPx || '0');
-        const positionValue = parseFloat(asset.positionValue || '0');
-        const unrealizedPnl = parseFloat(asset.unrealizedPnl || '0');
-        const returnOnEquity = parseFloat(asset.returnOnEquity || '0');
-
-        // Determine side (positive size = long, negative = short)
-        const side = size > 0 ? 'LONG' : size < 0 ? 'SHORT' : 'NONE';
-
-        if ((!managedSet || managedSet.has(symbol)) && (!Number.isFinite(size) || !Number.isFinite(positionValue))) {
-          throw new Error(`Invalid perpetual exposure for ${symbol}`);
-        }
-        if ((!managedSet || managedSet.has(symbol)) && size !== 0 && (includeDust || Math.abs(positionValue) >= MIN_NOTIONAL_USD)) {
-          positions.push({
-            symbol: symbol,
-            side: side,
-            size: Math.abs(size),
-            sizeRaw: size,
-            entryPrice: entryPx,
-            positionValue: Math.abs(positionValue),
-            unrealizedPnl: unrealizedPnl,
-            returnOnEquity: returnOnEquity * 100, // Convert to percentage
-            leverage: parseFloat(asset.leverage?.value || '0'),
-            liquidationPx: parseFloat(asset.liquidationPx || '0'),
-            marginUsed: parseFloat(asset.marginUsed || '0')
-          });
-        }
+      if ((!managedSet || managedSet.has(symbol)) && (!Number.isFinite(size) || !Number.isFinite(positionValue))) {
+        throw new Error(`Invalid perpetual exposure for ${symbol}`);
+      }
+      if ((!managedSet || managedSet.has(symbol)) && size !== 0 && (includeDust || Math.abs(positionValue) >= MIN_NOTIONAL_USD)) {
+        positions.push({
+          symbol: symbol,
+          side: side,
+          size: Math.abs(size),
+          sizeRaw: size,
+          entryPrice: entryPx,
+          positionValue: Math.abs(positionValue),
+          unrealizedPnl: unrealizedPnl,
+          returnOnEquity: returnOnEquity * 100, // Convert to percentage
+          leverage: parseFloat(asset.leverage?.value || '0'),
+          liquidationPx: parseFloat(asset.liquidationPx || '0'),
+          marginUsed: parseFloat(asset.marginUsed || '0')
+        });
       }
     }
-
-    if (verbose) {
-      console.log(`✅ Found ${positions.length} PERP position(s)`);
-    }
-
-    return positions;
-
-  } catch (error) {
-    console.error('Error fetching PERP positions:', error.message);
-    throw error;
   }
+
+  if (verbose) {
+    console.log(`✅ Found ${positions.length} PERP position(s)`);
+  }
+
+  return positions;
 }
 
 /**
@@ -143,66 +119,60 @@ export async function getSpotBalances(hyperliquid, user = null, options = {}) {
   const { verbose = false, managedSpotSymbols = null, includeDust = false } = options;
   const managedSet = managedSpotSymbols ? new Set(managedSpotSymbols) : null;
 
-  try {
-    user = user || hyperliquid.wallet;
+  user = user || hyperliquid.wallet;
 
-    if (!user) {
-      throw new Error('User address required to fetch balances');
-    }
+  if (!user) {
+    throw new Error('User address required to fetch balances');
+  }
 
-    if (verbose) {
-      console.log(`Fetching SPOT balances for ${user}...`);
-    }
+  if (verbose) {
+    console.log(`Fetching SPOT balances for ${user}...`);
+  }
 
-    const data = await hyperliquid.infoRequest({
-      type: 'spotClearinghouseState',
-      user: user
-    }, 2);
-    if (!Array.isArray(data?.balances)) throw new Error('Invalid spot account response');
+  const data = await hyperliquid.infoRequest({
+    type: 'spotClearinghouseState',
+    user: user
+  }, 2);
+  if (!Array.isArray(data?.balances)) throw new Error('Invalid spot account response');
 
-    const balances = [];
-    // Spot tokens are priced with their perp mid (same underlying; basis is filtered to <= 0.5%).
-    const mids = await hyperliquid.getAllMids();
+  const balances = [];
+  // Spot tokens are priced with their perp mid (same underlying; basis is filtered to <= 0.5%).
+  const mids = await hyperliquid.getAllMids();
 
-    // Process spot balances
-    if (data.balances && data.balances.length > 0) {
-      for (const balance of data.balances) {
-        const coin = balance.coin;
-        const total = parseFloat(balance.total || '0');
-        const hold = parseFloat(balance.hold || '0');
-        const available = total - hold;
-        if ((!managedSet || managedSet.has(coin)) && (!Number.isFinite(total) || !Number.isFinite(hold) || total < 0 || hold < 0 || hold > total)) {
-          throw new Error(`Invalid spot exposure for ${coin}`);
-        }
-        const price = parseFloat(mids[HyperliquidConnector.spotToPerp(coin)]);
-        const valueUSD = total * price;
+  // Process spot balances
+  if (data.balances && data.balances.length > 0) {
+    for (const balance of data.balances) {
+      const coin = balance.coin;
+      const total = parseFloat(balance.total || '0');
+      const hold = parseFloat(balance.hold || '0');
+      const available = total - hold;
+      if ((!managedSet || managedSet.has(coin)) && (!Number.isFinite(total) || !Number.isFinite(hold) || total < 0 || hold < 0 || hold > total)) {
+        throw new Error(`Invalid spot exposure for ${coin}`);
+      }
+      const price = parseFloat(mids[HyperliquidConnector.spotToPerp(coin)]);
+      const valueUSD = total * price;
 
-        // Only non-USDC balances worth at least MIN_NOTIONAL_USD (unknown price is kept, not dropped)
-        if (coin !== 'USDC' && total > 0 && (!managedSet || managedSet.has(coin)) &&
-            (includeDust || !(valueUSD < MIN_NOTIONAL_USD))) {
-          balances.push({
-            symbol: coin,
-            total: total,
-            hold: hold,
-            available: available,
-            price: Number.isFinite(price) ? price : null,
-            valueUSD: Number.isFinite(valueUSD) ? valueUSD : null,
-            token: balance.token
-          });
-        }
+      // Only non-USDC balances worth at least MIN_NOTIONAL_USD (unknown price is kept, not dropped)
+      if (coin !== 'USDC' && total > 0 && (!managedSet || managedSet.has(coin)) &&
+          (includeDust || !(valueUSD < MIN_NOTIONAL_USD))) {
+        balances.push({
+          symbol: coin,
+          total: total,
+          hold: hold,
+          available: available,
+          price: Number.isFinite(price) ? price : null,
+          valueUSD: Number.isFinite(valueUSD) ? valueUSD : null,
+          token: balance.token
+        });
       }
     }
-
-    if (verbose) {
-      console.log(`✅ Found ${balances.length} SPOT balance(s) (excluding USDC)`);
-    }
-
-    return balances;
-
-  } catch (error) {
-    console.error('Error fetching SPOT balances:', error.message);
-    throw error;
   }
+
+  if (verbose) {
+    console.log(`✅ Found ${balances.length} SPOT balance(s) (excluding USDC)`);
+  }
+
+  return balances;
 }
 
 /**

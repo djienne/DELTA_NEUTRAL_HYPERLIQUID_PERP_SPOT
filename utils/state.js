@@ -21,7 +21,6 @@ const DEFAULT_STATE = {
   version: '1.0',
   position: null,  // Current position, or null if no position
   pendingIntent: null,
-  lastCheckTime: null,
   lastOpportunityCheck: null,
   history: []  // Historical positions
 };
@@ -140,12 +139,7 @@ export function writeJsonAtomic(file, obj) {
  * @param {Object} state - State object to save
  */
 export function saveState(state) {
-  try {
-    writeJsonAtomic(getStateFilePath(), state);
-  } catch (error) {
-    console.error('[State] Error saving state:', error.message);
-    throw error;
-  }
+  writeJsonAtomic(getStateFilePath(), state);
 }
 
 /**
@@ -175,8 +169,7 @@ export function hasPosition(state) {
 export function recordPosition(state, positionData) {
   const position = {
     ...compactPositionData(positionData),
-    openTime: Object.hasOwn(positionData, 'openTime') ? positionData.openTime : Date.now(),
-    lastCheckTime: Date.now()
+    openTime: Object.hasOwn(positionData, 'openTime') ? positionData.openTime : Date.now()
   };
 
   return {
@@ -234,13 +227,6 @@ export function closePosition(state, closeData) {
     closeFills: closeData.closeFills ?? null,
     feesActual: closeData.feesActual || 0,
     feesEstimated: closeData.feesEstimated || 0,
-    pnl: {
-      price: pricePnl,
-      funding: closeData.fundingPnl ?? null,
-      feesActual: closeData.feesActual || 0,
-      feesEstimated: closeData.feesEstimated || 0,
-      total: closeData.totalPnl
-    },
     totalPnl: closeData.totalPnl,
     duration: Number.isFinite(state.position.openTime) ? Date.now() - state.position.openTime : null
   };
@@ -249,26 +235,7 @@ export function closePosition(state, closeData) {
     ...state,
     position: null,
     pendingIntent: null,
-    history: [...state.history, historicalPosition].slice(-(state.maxHistory || DEFAULT_MAX_HISTORY)),
-    lastCheckTime: Date.now()
-  };
-}
-
-/**
- * Update position check time
- * @param {Object} state - State object
- * @returns {Object} Updated state
- */
-export function updateCheckTime(state) {
-  return {
-    ...state,
-    lastCheckTime: Date.now(),
-    ...(state.position ? {
-      position: {
-        ...state.position,
-        lastCheckTime: Date.now()
-      }
-    } : {})
+    history: [...state.history, historicalPosition].slice(-(state.maxHistory || DEFAULT_MAX_HISTORY))
   };
 }
 
@@ -343,8 +310,8 @@ export function getHistoryStats(state) {
   }
 
   const totalPositions = state.history.length;
-  const known = state.history.filter(p => p.accountingComplete !== false && Number.isFinite(p.pnl?.total ?? p.totalPnl));
-  const totalPnl = known.reduce((sum, p) => sum + (p.pnl?.total ?? p.totalPnl), 0);
+  const known = state.history.filter(p => p.accountingComplete !== false && Number.isFinite(p.totalPnl));
+  const totalPnl = known.reduce((sum, p) => sum + p.totalPnl, 0);
   const durations = state.history.map(p => p.duration).filter(Number.isFinite);
   const fundingRates = state.history.map(p => p.annualizedFunding).filter(Number.isFinite);
   const avgDuration = durations.length ? durations.reduce((sum, n) => sum + n, 0) / durations.length : null;

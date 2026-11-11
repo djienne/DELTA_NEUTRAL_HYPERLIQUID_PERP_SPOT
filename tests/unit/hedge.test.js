@@ -49,7 +49,6 @@ test('hedge analysis emits a spot-strengthen action for excess PERP short', asyn
   });
 
   const analysis = await analyzeHedgeNeeds(hyperliquid, {
-    minValueUSD: 1,
     managedPerpSymbols: ['BTC'],
     managedSpotSymbols: ['UBTC']
   });

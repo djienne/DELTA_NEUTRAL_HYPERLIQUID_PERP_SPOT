@@ -1,9 +1,7 @@
 import HyperliquidConnector from '../hyperliquid.js';
 
 export function getMaxBidAskSpreadPercent(thresholds = {}) {
-  return thresholds.maxSpreadPercent ??
-    thresholds.maxBidAskSpreadPercent ??
-    0.15;
+  return thresholds.maxSpreadPercent ?? 0.15;
 }
 
 export function getMinFillRatio(config = {}) {
