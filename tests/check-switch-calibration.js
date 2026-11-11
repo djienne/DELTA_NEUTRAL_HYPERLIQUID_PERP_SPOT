@@ -1,4 +1,5 @@
 import fs from 'fs';
+import zlib from 'zlib';
 import { switchEdge } from '../utils/position-decision.js';
 import { getTakerFees } from '../utils/risk.js';
 
@@ -15,6 +16,8 @@ import { getTakerFees } from '../utils/risk.js';
  * SPREAD_PCT; volume/spread filters are ignored (all configured pairs always eligible).
  *
  * Usage: node tests/check-switch-calibration.js [days=730]
+ * In Docker, use the bot's image and mount only tests/, config.json and data/ (a VOLUME in the image: unmounted, the
+ * cache vanishes with --rm); mounting the whole repo loads node_modules over the slow Windows bind mount (+5 s).
  */
 
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
@@ -26,10 +29,15 @@ const SPREAD_PCT = 0.05;  // perp + spot bid-ask spread, percent (typical for th
 const fees = getTakerFees(config);
 const LEG = fees.perp + fees.spot, SPREAD = SPREAD_PCT / 100;
 
+// Per coin {from: ms covered since, to: ms fetched up to, rows: [[hour, rate]]}, Brotli JSON (fast to decode).
+// Reruns only fetch the hours since `to`; delete the file to rebuild it.
+const CACHE = './data/funding-history.json.br';
+const cache = fs.existsSync(CACHE) ? JSON.parse(zlib.brotliDecompressSync(fs.readFileSync(CACHE))) : {};
+
 async function fundingHistory(coin) {
-  const out = new Map();
-  const end = Date.now();
-  let start = end - DAYS * 864e5;
+  const end = Date.now(), want = end - DAYS * 864e5;
+  const c = cache[coin]?.from <= want ? cache[coin] : { from: want, to: want, rows: [] };
+  let start = c.to;
   while (start < end) {
     let page;
     for (let i = 0; i < 8; i++) {
@@ -40,21 +48,35 @@ async function fundingHistory(coin) {
       if (res.status !== 429) { page = await res.json(); break; }
       await new Promise(r => setTimeout(r, 5000 * (i + 1)));
     }
-    // fundingHistory weighs 20 of the 1200/min per-IP limit, which every bot on this PC shares: 6 s = 200/min
-    await new Promise(r => setTimeout(r, 6000));
     if (!page?.length) break;
-    for (const p of page) out.set(Math.round(p.time / 36e5), parseFloat(p.fundingRate));
-    start = page[page.length - 1].time + 1;
+    for (const p of page) {  // append only newer hours: an overlapping page adds no duplicate
+      const h = Math.round(p.time / 36e5);
+      if (h > (c.rows.at(-1)?.[0] ?? -Infinity)) c.rows.push([h, parseFloat(p.fundingRate)]);
+    }
+    start = c.to = page[page.length - 1].time + 1;
     if (page.length < 500) break;
+    // A full page weighs 45 of the 1200/min per-IP limit every bot on this PC shares: 6 s = 450/min
+    await new Promise(r => setTimeout(r, 6000));
   }
-  return out;
+  cache[coin] = c;
+  fs.mkdirSync('./data', { recursive: true });
+  fs.writeFileSync(CACHE, zlib.brotliCompressSync(JSON.stringify(cache)));  // per coin: an interrupted run keeps it
+  return new Map(c.rows.filter(([h]) => h >= want / 36e5));
 }
 
 console.log(`Fetching ${DAYS}d hourly funding for ${COINS.join(', ')} ...`);
 const raw = {};
 for (const c of COINS) raw[c] = await fundingHistory(c);
+for (const c of COINS) {  // sanity: finite rates within Hyperliquid's 4%/h cap; missing hours stay gaps, never zero
+  const hs = [...raw[c].keys()];
+  if (!hs.length || [...raw[c].values()].some(r => !Number.isFinite(r) || Math.abs(r) > 0.04)) {
+    throw new Error(`${c}: no data or an impossible funding rate (delete ${CACHE} to refetch)`);
+  }
+  console.log(`  ${c.padEnd(9)}${hs.length} h since ${new Date(hs[0] * 36e5).toISOString().slice(0, 10)}, ${hs.at(-1) - hs[0] + 1 - hs.length} missing`);
+}
 const all = COINS.flatMap(c => [...raw[c].keys()]);
-const h0 = Math.min(...all), T = Math.max(...all) - h0 + 1, MID = Math.floor(T / 2);
+// reduce, not Math.min(...all): spreading ~140k hours as arguments overflows the stack
+const h0 = all.reduce((a, b) => Math.min(a, b)), T = all.reduce((a, b) => Math.max(a, b)) - h0 + 1, MID = Math.floor(T / 2);
 const R = {}, S = {}, K = {};  // hourly rates (NaN = missing), prefix sums and counts of present hours
 for (const c of COINS) {
   R[c] = new Float64Array(T).fill(NaN); S[c] = new Float64Array(T + 1); K[c] = new Int32Array(T + 1);
