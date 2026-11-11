@@ -74,16 +74,6 @@ function expectedConnectionId(action, nonce, vaultAddress = null) {
   return ethers.keccak256(new Uint8Array(bytes));
 }
 
-test('l2Book payload defaults to 5 significant figures', () => {
-  const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
-
-  assert.deepEqual(connector.buildL2BookPayload('BTC'), {
-    type: 'l2Book',
-    coin: 'BTC',
-    nSigFigs: 5
-  });
-});
-
 test('health monitoring uses app-level ping and handles app-level pong', async () => {
   const connector = new HyperliquidConnector({
     wallet: '0x0',

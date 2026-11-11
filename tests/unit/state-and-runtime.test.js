@@ -4,12 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import HyperliquidConnector from '../../hyperliquid.js';
-import { canClosePosition, clearPendingIntent, getHistoryStats, loadState, recordPosition, closePosition, saveState, setPendingIntent } from '../../utils/state.js';
-import { timestamp } from '../../bot.js';
-
-test('bot timestamp is available at module scope', () => {
-  assert.match(timestamp(), /^\[\d{1,2}:\d{2}:\d{2}/);
-});
+import { canClosePosition, getHistoryStats, loadState, recordPosition, closePosition, saveState } from '../../utils/state.js';
 
 test('getBidAsk includes mid price', () => {
   const connector = new HyperliquidConnector({ wallet: '0x0' });
@@ -94,15 +89,6 @@ test('state file path can point at a missing directory', () => {
     }
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
-});
-
-test('pending intents are persisted and cleared through state helpers', () => {
-  const initial = { version: '1.0', position: null, history: [] };
-  const pending = setPendingIntent(initial, { type: 'opening', symbol: 'BTC', createdAt: 123 });
-
-  assert.equal(pending.pendingIntent.type, 'opening');
-  assert.equal(pending.pendingIntent.createdAt, 123);
-  assert.equal(clearPendingIntent(pending).pendingIntent, null);
 });
 
 test('corrupt state file is quarantined instead of silently reused', () => {

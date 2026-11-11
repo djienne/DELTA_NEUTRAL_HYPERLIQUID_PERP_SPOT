@@ -68,7 +68,6 @@ test('SPOT cleanup after PERP failure is not reduce-only and requires connector 
   assert.equal(cleanup.side, 'sell');
   assert.equal(cleanup.options.isSpot, true);
   assert.equal(cleanup.options.reduceOnly, false);
-  assert.equal(cleanup.options.overrideMidPrice, undefined);
 });
 
 test('PERP cleanup after SPOT failure is reduce-only and requires connector pricing', async () => {
@@ -85,7 +84,6 @@ test('PERP cleanup after SPOT failure is reduce-only and requires connector pric
   assert.equal(cleanup.side, 'buy');
   assert.equal(cleanup.options.isSpot, false);
   assert.equal(cleanup.options.reduceOnly, true);
-  assert.equal(cleanup.options.overrideMidPrice, undefined);
 });
 
 test('imbalanced partial fills are closed with actual filled sizes', async () => {

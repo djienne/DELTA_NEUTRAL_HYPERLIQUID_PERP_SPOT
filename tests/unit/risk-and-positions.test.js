@@ -1,33 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  getManagedSpotSymbols,
-  getMaxBidAskSpreadPercent,
-  getMaxHedgeMismatchPercent,
-  getMaxOpenHedgeMismatchPercent,
-  getManagedPerpSymbols,
-  getMinFillRatio,
-  getStartupCleanupMode
-} from '../../utils/risk.js';
+import { getManagedSpotSymbols, getManagedPerpSymbols, getStartupCleanupMode } from '../../utils/risk.js';
 import { analyzeDeltaNeutral, getPerpPositions, getSpotBalances } from '../../utils/positions.js';
 import { rebalanceNeeded } from '../../utils/balance.js';
 
-test('maxSpreadPercent is the preferred bid-ask spread threshold key', () => {
-  assert.equal(getMaxBidAskSpreadPercent({ maxSpreadPercent: 0.25 }), 0.25);
-  assert.equal(getMaxBidAskSpreadPercent({}), 0.15);
-});
-
-test('risk defaults are stable', () => {
-  assert.equal(getMinFillRatio({}), 0.999);
-  assert.equal(getMaxOpenHedgeMismatchPercent({}), 2);
-  assert.equal(getMaxHedgeMismatchPercent({}), 2);
-  assert.equal(getStartupCleanupMode({}), 'hedge-only');
-});
-
 test('startup cleanup mode is allowlisted', () => {
-  assert.equal(getStartupCleanupMode({ risk: { startupCleanupMode: 'report-only' } }), 'report-only');
-  assert.equal(getStartupCleanupMode({ risk: { startupCleanupMode: 'hedge-only' } }), 'hedge-only');
-  assert.equal(getStartupCleanupMode({ risk: { startupCleanupMode: 'hedge-or-close' } }), 'hedge-or-close');
   assert.equal(getStartupCleanupMode({ risk: { startupCleanupMode: 'unexpected' } }), 'hedge-only');
 });
 

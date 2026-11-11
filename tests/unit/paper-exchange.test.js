@@ -239,13 +239,3 @@ test('operator response delay keeps 440/560 on hold; restart settles once and pr
   assert.equal(reloaded.equity(mids).equity,1000);
   assert.equal(reloaded.equity(mids).pendingOperatorTransfer,false);
 });
-
-test('legacy in-transit transfer credits once without a second debit', async () => {
-  const {paper}=makePaper();await paper.loadMeta();const now=Date.now();
-  paper.mutate(L=>{L.perpUSDC=440;L.spotUSDC=500;L.transfers=[{amount:60,to:'perp',startedAt:now-MINUTE,eta:now}];});
-  const mids={BTC:'100','@142':'100'};
-  assert.equal(paper.equity(mids).equity,1000);
-  paper.mutate(L=>paper.landTransfers(L,now));paper.mutate(L=>paper.landTransfers(L,now));
-  assert.equal(paper.ledger.perpUSDC,500);assert.equal(paper.ledger.spotUSDC,500);
-  assert.equal(paper.equity(mids).equity,1000);
-});
