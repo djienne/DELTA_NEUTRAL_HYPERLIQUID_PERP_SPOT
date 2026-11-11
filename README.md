@@ -110,10 +110,7 @@ The switch parameters were measured on 2 years of Hyperliquid funding history (a
 
 ### Market Analysis
 ```bash
-node tests/check-funding-rates.js      # Funding accruing this hour
-node tests/check-funding-history.js    # 7-day averages (what the bot trades on)
-node tests/check-positions.js          # Your positions
-node tests/check-24h-volumes.js        # Trading volumes
+node tests/check-opportunities.js      # Entry filters and 7-day funding ranking (what the bot trades on)
 ```
 
 ### Emergency Operations

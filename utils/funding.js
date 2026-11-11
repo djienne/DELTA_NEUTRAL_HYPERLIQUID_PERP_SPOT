@@ -107,30 +107,6 @@ export async function getFundingRates(hyperliquid, symbols, options = {}) {
 }
 
 /**
- * Sort funding rates by annualized rate (highest first)
- * Filters out symbols with errors
- *
- * @param {Object[]} fundingRates - Array of funding rate objects
- * @param {boolean} descending - Sort descending (highest first) if true
- * @returns {Object[]} Sorted array of funding rate objects
- */
-export function sortByAnnualizedRate(fundingRates, descending = true) {
-  // Filter out entries with errors
-  const validRates = fundingRates.filter(r => r.annualizedRate !== null && r.error === undefined);
-
-  // Sort by annualized rate
-  validRates.sort((a, b) => {
-    if (descending) {
-      return b.annualizedRate - a.annualizedRate; // Highest first
-    } else {
-      return a.annualizedRate - b.annualizedRate; // Lowest first
-    }
-  });
-
-  return validRates;
-}
-
-/**
  * Fetch historical funding rates for a specific coin
  *
  * @param {HyperliquidConnector} hyperliquid - Initialized Hyperliquid connector
@@ -307,39 +283,4 @@ export async function getFundingRatesWithHistory(hyperliquid, symbols, options =
   }
 
   return results;
-}
-
-/**
- * Format funding rates with history for CSV export
- *
- * @param {Object[]} fundingRates - Array of funding rate objects with history
- * @returns {string} CSV formatted string
- */
-export function fundingRatesWithHistoryToCSV(fundingRates) {
-  const headers = 'symbol,currentHourly,currentAnnualizedPct,avg7dHourly,avg7dAnnualizedPct,min7dAnnualizedPct,max7dAnnualizedPct,vsAvgPctChange,error';
-
-  const rows = fundingRates.map(r => {
-    const currentHourly = r.fundingRate !== null ? r.fundingRate : '';
-    const currentAnnPct = r.annualizedRate !== null ? (r.annualizedRate * 100).toFixed(4) : '';
-
-    let avg7dHourly = '';
-    let avg7dAnnPct = '';
-    let min7dAnnPct = '';
-    let max7dAnnPct = '';
-    let vsAvgPct = '';
-
-    if (r.history) {
-      avg7dHourly = r.history.avg.hourly || '';
-      avg7dAnnPct = r.history.avg.annualized !== null ? (r.history.avg.annualized * 100).toFixed(4) : '';
-      min7dAnnPct = r.history.min.annualized !== null ? (r.history.min.annualized * 100).toFixed(4) : '';
-      max7dAnnPct = r.history.max.annualized !== null ? (r.history.max.annualized * 100).toFixed(4) : '';
-      vsAvgPct = r.history.vsCurrent.percentChange !== null ? r.history.vsCurrent.percentChange.toFixed(2) : '';
-    }
-
-    const error = r.error || r.historyError || '';
-
-    return `${r.symbol},${currentHourly},${currentAnnPct},${avg7dHourly},${avg7dAnnPct},${min7dAnnPct},${max7dAnnPct},${vsAvgPct},${error}`;
-  });
-
-  return [headers, ...rows].join('\n');
 }

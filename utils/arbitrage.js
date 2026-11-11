@@ -46,16 +46,13 @@ async function getSinglePerpSpotSpread(hyperliquid, perpSymbol, priceMap) {
     }
 
     const spreadPercent = calculatePerpSpotSpreadPercent(perpMid, spotMid);
-    const spreadAbs = spotMid - perpMid;
 
     return {
       perpSymbol: perpSymbol,
       spotSymbol: spotSymbol,
       perpMid: perpMid,
       spotMid: spotMid,
-      spreadAbs: spreadAbs,
       spreadPercent: spreadPercent,
-      isPremium: spreadAbs > 0, // true if spot is more expensive
       error: null
     };
   } catch (error) {
@@ -64,9 +61,7 @@ async function getSinglePerpSpotSpread(hyperliquid, perpSymbol, priceMap) {
       spotSymbol: HyperliquidConnector.perpToSpot(perpSymbol),
       perpMid: null,
       spotMid: null,
-      spreadAbs: null,
       spreadPercent: null,
-      isPremium: null,
       error: error.message
     };
   }
@@ -123,92 +118,4 @@ export async function getPerpSpotSpreads(hyperliquid, perpSymbols, options = {})
   });
 
   return await fetchWithConcurrencyLimit(tasks, finalConcurrency, finalDelay);
-}
-
-/**
- * Filter spreads by maximum spread percentage
- * @param {Array} spreadResults - Results from getPerpSpotSpreads()
- * @param {number} maxSpreadPercent - Maximum spread percentage (absolute value)
- * @returns {Object} Object with wideSpread and narrowSpread arrays
- */
-export function filterByPerpSpotSpread(spreadResults, maxSpreadPercent) {
-  const wideSpread = [];
-  const narrowSpread = [];
-
-  for (const result of spreadResults) {
-    if (result.error || result.spreadPercent === null) {
-      continue;
-    }
-
-    // Use absolute value for comparison
-    if (Math.abs(result.spreadPercent) > maxSpreadPercent) {
-      wideSpread.push(result);
-    } else {
-      narrowSpread.push(result);
-    }
-  }
-
-  return { wideSpread, narrowSpread };
-}
-
-/**
- * Format PERP-SPOT spread results as a table string
- * @param {Array} spreadResults - Results from getPerpSpotSpreads()
- * @returns {string} Formatted table
- */
-export function formatPerpSpotSpreadTable(spreadResults) {
-  const lines = [];
-
-  lines.push('┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────┐');
-  lines.push('│ Perp Symbol  │ Spot Symbol  │ Perp Mid     │ Spot Mid     │ Spread Abs   │ Spread % │');
-  lines.push('├──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────┤');
-
-  for (const result of spreadResults) {
-    if (result.error) {
-      lines.push(
-        `│ ${result.perpSymbol.padEnd(12)} │ ${result.spotSymbol.padEnd(12)} │ ${('ERROR: ' + result.error).padEnd(49)} │`
-      );
-      continue;
-    }
-
-    const perpStr = result.perpMid !== null ? result.perpMid.toFixed(6).padStart(12) : 'N/A'.padStart(12);
-    const spotStr = result.spotMid !== null ? result.spotMid.toFixed(6).padStart(12) : 'N/A'.padStart(12);
-    const absStr = result.spreadAbs !== null ? result.spreadAbs.toFixed(6).padStart(12) : 'N/A'.padStart(12);
-
-    let spreadStr = 'N/A'.padStart(8);
-    if (result.spreadPercent !== null) {
-      const sign = result.spreadPercent >= 0 ? '+' : '';
-      spreadStr = (sign + result.spreadPercent.toFixed(4) + '%').padStart(8);
-    }
-
-    lines.push(
-      `│ ${result.perpSymbol.padEnd(12)} │ ${result.spotSymbol.padEnd(12)} │ ` +
-      `${perpStr} │ ${spotStr} │ ${absStr} │ ${spreadStr} │`
-    );
-  }
-
-  lines.push('└──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────┘');
-
-  return lines.join('\n');
-}
-
-/**
- * Save PERP-SPOT spread results to CSV file
- * @param {Array} spreadResults - Results from getPerpSpotSpreads()
- * @returns {string} CSV content
- */
-export function perpSpotSpreadToCSV(spreadResults) {
-  const lines = ['perpSymbol,spotSymbol,perpMid,spotMid,spreadAbs,spreadPercent,isPremium,error'];
-
-  for (const result of spreadResults) {
-    lines.push(
-      `${result.perpSymbol},${result.spotSymbol},` +
-      `${result.perpMid || ''},${result.spotMid || ''},` +
-      `${result.spreadAbs || ''},${result.spreadPercent || ''},` +
-      `${result.isPremium !== null ? result.isPremium : ''},` +
-      `${result.error || ''}`
-    );
-  }
-
-  return lines.join('\n') + '\n';
 }

@@ -20,13 +20,7 @@ node tests/check-switch-calibration.js       # re-estimate switch parameters fro
 node emergency-close.js                      # close everything, PERP and SPOT in parallel
 
 # Read-only diagnostics
-node tests/check-funding-history.js          # 7d average vs current funding
-node tests/check-funding-rates.js            # funding accruing this hour
-node tests/check-24h-volumes.js              # 24h notional volume vs threshold
-node tests/check-spreads.js                  # bid-ask spreads
-node tests/check-perp-spot-spreads.js        # PERP-SPOT basis
-node tests/check-positions.js                # positions + hedge quality
-node tests/check-spot-perp-balances.js       # PERP/SPOT USDC split
+node tests/check-opportunities.js            # entry filters + 7d ranking (the bot's findBestOpportunities)
 node tests/hedge-positions.js --analyze      # imbalance report (--execute places orders)
 
 MIN_HOLD_TIME_MS=300000 node bot.js          # override min hold (testing)
@@ -36,9 +30,8 @@ docker compose -f docker-compose.paper.yml up -d --build   # same, persistent co
 python paper_stats.py                        # paper results: PnL decomposition, per pair, switches, drawdown
 ```
 
-Scripts that can place orders (`test-perp-short`, `test-spot-market-orders`, `test-spot-perp-transfer`,
-`hedge-positions --execute`) refuse to run unless `RUN_LIVE_TRADING_TESTS=1` (`utils/live-guard.js`).
-Never run them from an agent session.
+`hedge-positions --execute` places orders and refuses to run unless `RUN_LIVE_TRADING_TESTS=1` (`utils/live-guard.js`).
+Never run it (or `emergency-close.js`) from an agent session.
 
 ## Architecture
 
@@ -163,7 +156,7 @@ sub-account/vault: info queries use `wallet_address`, and every signed action (o
   or funding is `null`, so the pair is rejected, never counted as 0.
 - Tables reserve a sign column: `n >= 0 ? ' ' + n.toFixed(d) : n.toFixed(d)`.
 - Rate-limit (429) errors on market data use `retryWithExponentialBackoff` in `bot.js`.
-- Hedge enforcement: 2% difference divided by the larger leg; larger differences are repaired only when executable after lot rounding. Quality labels are descriptive, not the safety threshold.
+- Hedge enforcement: 2% difference divided by the larger leg; larger differences are repaired only when executable after lot rounding.
 - New logic gets a unit test in `tests/unit/` with a fake connector; see `trade-cleanup.test.js` for the fake's shape.
 
 ### Recovery changes

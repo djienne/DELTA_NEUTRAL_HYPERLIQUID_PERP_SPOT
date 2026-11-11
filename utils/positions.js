@@ -206,29 +206,6 @@ export async function getSpotBalances(hyperliquid, user = null, options = {}) {
 }
 
 /**
- * Get both PERP positions and SPOT balances
- *
- * @param {HyperliquidConnector} hyperliquid - Initialized Hyperliquid connector
- * @param {string} user - User wallet address (optional, uses configured wallet)
- * @param {Object} options - Optional parameters
- * @param {boolean} options.verbose - Log progress to console
- * @returns {Promise<Object>} Object with perp and spot arrays
- */
-export async function getAllPositions(hyperliquid, user = null, options = {}) {
-  const { verbose = false } = options;
-
-  const [perpPositions, spotBalances] = await Promise.all([
-    getPerpPositions(hyperliquid, user, { verbose, managedPerpSymbols: options.managedPerpSymbols }),
-    getSpotBalances(hyperliquid, user, { verbose, managedSpotSymbols: options.managedSpotSymbols })
-  ]);
-
-  return {
-    perp: perpPositions,
-    spot: spotBalances
-  };
-}
-
-/**
  * Identify delta-neutral positions
  * Matches PERP positions with corresponding SPOT balances
  *
@@ -262,10 +239,8 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
     const spotBalance = spotMap.get(symbol);
 
     if (spotBalance) {
-      // Calculate hedge ratio
       const perpSize = Math.abs(perpPosition.sizeRaw);
       const spotSize = spotBalance.total;
-      const hedgeRatio = spotSize / perpSize;
 
       // Spot balances are long-only in this bot. LONG perp + LONG spot is directional.
       const isDeltaNeutral = perpPosition.side === 'SHORT' && spotSize > 0;
@@ -277,31 +252,15 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
       const sizeMismatch = Math.abs(perpSize - spotSize);
       const sizeMismatchPct = getSizeMismatchPercent(perpSize, spotSize);
 
-      // Determine hedge quality
-      let hedgeQuality = 'NONE';
-      if (isDeltaNeutral) {
-        if (sizeMismatchPct < 5) {
-          hedgeQuality = 'PERFECT';
-        } else if (sizeMismatchPct < 15) {
-          hedgeQuality = 'GOOD';
-        } else if (sizeMismatchPct < 30) {
-          hedgeQuality = 'PARTIAL';
-        } else {
-          hedgeQuality = 'WEAK';
-        }
-      }
-
       const pair = {
         symbol: symbol,
         perpSide: perpPosition.side,
         perpSize: perpSize,
         spotSize: spotSize,
-        hedgeRatio: hedgeRatio,
         sizeMismatch: sizeMismatch,
         sizeMismatchPct: sizeMismatchPct,
         isDeltaNeutral: isDeltaNeutral,
         imbalanceType: imbalanceType,
-        hedgeQuality: hedgeQuality,
         perpPosition: perpPosition,
         spotBalance: spotBalance
       };
@@ -332,59 +291,6 @@ export function analyzeDeltaNeutral(perpPositions, spotBalances, options = {}) {
     deltaNeutralPairs: deltaNeutralPairs,
     imbalancedPairs: imbalancedPairs,
     unmatchedPerp: unmatchedPerp,
-    unmatchedSpot: unmatchedSpot,
-    hasDeltaNeutral: deltaNeutralPairs.length > 0,
-    perfectHedges: deltaNeutralPairs.filter(p => p.hedgeQuality === 'PERFECT').length,
-    goodHedges: deltaNeutralPairs.filter(p => p.hedgeQuality === 'GOOD').length
+    unmatchedSpot: unmatchedSpot
   };
-}
-
-/**
- * Format positions for CSV export
- *
- * @param {Object[]} perpPositions - Array of PERP positions
- * @param {Object[]} spotBalances - Array of SPOT balances
- * @returns {string} CSV formatted string
- */
-export function positionsToCSV(perpPositions, spotBalances) {
-  const rows = [];
-
-  // PERP positions header
-  rows.push('PERP POSITIONS');
-  rows.push('symbol,side,size,entryPrice,positionValue,unrealizedPnl,returnOnEquity,leverage,marginUsed');
-
-  for (const pos of perpPositions) {
-    rows.push(
-      `${pos.symbol},${pos.side},${pos.size},${pos.entryPrice},${pos.positionValue},` +
-      `${pos.unrealizedPnl},${pos.returnOnEquity.toFixed(2)},${pos.leverage},${pos.marginUsed}`
-    );
-  }
-
-  rows.push('');
-  rows.push('SPOT BALANCES');
-  rows.push('symbol,total,hold,available');
-
-  for (const bal of spotBalances) {
-    rows.push(`${bal.symbol},${bal.total},${bal.hold},${bal.available}`);
-  }
-
-  return rows.join('\n');
-}
-
-/**
- * Format delta-neutral analysis for CSV export
- *
- * @param {Object} analysis - Delta-neutral analysis from analyzeDeltaNeutral
- * @returns {string} CSV formatted string
- */
-export function deltaNeutralToCSV(analysis) {
-  const headers = 'symbol,perpSide,perpSize,spotSize,hedgeRatio,sizeMismatch,sizeMismatchPct,isDeltaNeutral,hedgeQuality';
-
-  const rows = analysis.deltaNeutralPairs.map(pair => {
-    return `${pair.symbol},${pair.perpSide},${pair.perpSize},${pair.spotSize},` +
-           `${pair.hedgeRatio.toFixed(4)},${pair.sizeMismatch.toFixed(6)},` +
-           `${pair.sizeMismatchPct.toFixed(2)},${pair.isDeltaNeutral},${pair.hedgeQuality}`;
-  });
-
-  return [headers, ...rows].join('\n');
 }
