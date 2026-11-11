@@ -10,7 +10,7 @@ import {
   getStartupCleanupMode
 } from '../../utils/risk.js';
 import { analyzeDeltaNeutral, getPerpPositions, getSpotBalances } from '../../utils/positions.js';
-import { checkBalanceDistribution } from '../../utils/balance.js';
+import { rebalanceNeeded } from '../../utils/balance.js';
 
 test('maxSpreadPercent is the preferred bid-ask spread threshold key', () => {
   assert.equal(getMaxBidAskSpreadPercent({ maxSpreadPercent: 0.25 }), 0.25);
@@ -97,10 +97,13 @@ test('exposure below the $10 order minimum is ignored as untradeable dust', asyn
   assert.equal(spots[0].valueUSD, 50);
 });
 
-test('rebalance hold threshold: maxBalanceImbalancePercent 10 = 50/50 +-5 points (bot.js passes 10 / 2)', () => {
-  const split = perpPercent => ({ perpPercent, spotPercent: 100 - perpPercent });
-  assert.equal(checkBalanceDistribution(split(44), 10 / 2).isBalanced, false);  // 12% imbalance: ON HOLD
-  assert.equal(checkBalanceDistribution(split(56), 10 / 2).isBalanced, false);
-  assert.equal(checkBalanceDistribution(split(46), 10 / 2).isBalanced, true);   // 8% imbalance: trade
-  assert.equal(checkBalanceDistribution(split(54), 10 / 2).isBalanced, true);
+test('rebalance hold threshold: maxBalanceImbalancePercent 10 = 50/50 +-5 points', () => {
+  const split = perp => ({ perpBalance: perp, spotBalance: 100 - perp, totalBalance: 100 });
+  assert.equal(rebalanceNeeded(split(44), 10).onHold, true);   // 12% imbalance: ON HOLD
+  assert.equal(rebalanceNeeded(split(56), 10).onHold, true);
+  assert.equal(rebalanceNeeded(split(46), 10).onHold, false);  // 8% imbalance: trade
+  assert.equal(rebalanceNeeded(split(54), 10).onHold, false);
+  const ask = rebalanceNeeded(split(44), 10);                  // the transfer that restores 50/50
+  assert.equal(ask.amount, 6); assert.equal(ask.fromPerpToSpot, false);
+  assert.equal(rebalanceNeeded({ perpBalance: 0, spotBalance: 0, totalBalance: 0 }, 10).onHold, false);
 });

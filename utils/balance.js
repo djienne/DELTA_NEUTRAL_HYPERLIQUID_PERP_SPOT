@@ -1,181 +1,21 @@
 /**
- * Balance Management Utilities
- *
- * Check PERP and SPOT balance distribution and suggest transfers.
- */
-
-/**
- * Get PERP and SPOT balances
- * @param {HyperliquidConnector} hyperliquid - Hyperliquid connector
- * @param {string} user - User wallet address
- * @returns {Promise<Object>} Balance information
+ * Free PERP / SPOT USDC, and whether the split needs a manual transfer before the next open (an API key cannot move funds).
  */
 export async function getBalances(hyperliquid, user = null) {
   user = user || hyperliquid.wallet;
-
-  if (!user) {
-    throw new Error('User address required');
-  }
-
-  // Fetch both clearinghouse states in parallel
+  if (!user) throw new Error('User address required');
   const [perpState, spotState] = await Promise.all([
-    hyperliquid.infoRequest({
-      type: 'clearinghouseState',
-      user: user
-    }, 2),
-
-    hyperliquid.infoRequest({
-      type: 'spotClearinghouseState',
-      user: user
-    }, 2)
+    hyperliquid.infoRequest({ type: 'clearinghouseState', user }, 2),
+    hyperliquid.infoRequest({ type: 'spotClearinghouseState', user }, 2)
   ]);
-
-  // PERP balance (withdrawable)
   const perpBalance = parseFloat(perpState.withdrawable || '0');
-
-  // SPOT balance (USDC only)
-  const spotBalances = spotState.balances || [];
-  const usdcBalance = spotBalances.find(b => b.coin === 'USDC');
-  const spotBalance = parseFloat(usdcBalance?.total || '0');
-
-  // Total balance
-  const totalBalance = perpBalance + spotBalance;
-
-  // Calculate percentages
-  const perpPercent = totalBalance > 0 ? (perpBalance / totalBalance) * 100 : 0;
-  const spotPercent = totalBalance > 0 ? (spotBalance / totalBalance) * 100 : 0;
-
-  return {
-    perpBalance: perpBalance,
-    spotBalance: spotBalance,
-    totalBalance: totalBalance,
-    perpPercent: perpPercent,
-    spotPercent: spotPercent
-  };
+  const spotBalance = parseFloat((spotState.balances || []).find(b => b.coin === 'USDC')?.total || '0');
+  return { perpBalance, spotBalance, totalBalance: perpBalance + spotBalance };
 }
 
-/**
- * Check if the PERP/SPOT split is within 50% ± tolerance points
- * @param {Object} balances - Balance information from getBalances
- * @param {number} tolerance - Allowed distance from 50%, in percentage points (default 10 = 40/60). The bot passes
- *   bot.maxBalanceImbalancePercent / 2 (default 5 = 45/55) and holds new positions outside it.
- * @returns {Object} Balance check result
- */
-export function checkBalanceDistribution(balances, tolerance = 10) {
-  const target = 50; // Target 50/50 split
-  const minPercent = target - tolerance;
-  const maxPercent = target + tolerance;
-
-  const perpBalanced = balances.perpPercent >= minPercent && balances.perpPercent <= maxPercent;
-  const spotBalanced = balances.spotPercent >= minPercent && balances.spotPercent <= maxPercent;
-  const isBalanced = perpBalanced && spotBalanced;
-
-  // Calculate imbalance
-  const perpImbalance = balances.perpPercent - target;
-  const spotImbalance = balances.spotPercent - target;
-
-  return {
-    isBalanced: isBalanced,
-    perpBalanced: perpBalanced,
-    spotBalanced: spotBalanced,
-    perpImbalance: perpImbalance,
-    spotImbalance: spotImbalance,
-    target: target,
-    tolerance: tolerance,
-    minPercent: minPercent,
-    maxPercent: maxPercent
-  };
-}
-
-/**
- * Suggest transfer to rebalance funds
- * @param {Object} balances - Balance information from getBalances
- * @param {Object} balanceCheck - Balance check from checkBalanceDistribution
- * @returns {Object|null} Transfer suggestion or null if balanced
- */
-export function suggestTransfer(balances, balanceCheck) {
-  if (balanceCheck.isBalanced) {
-    return null;
-  }
-
-  // Determine direction and amount
-  let direction;
-  let amount;
-
-  if (balances.perpPercent > 50) {
-    // Too much in PERP, transfer to SPOT
-    direction = 'PERP → SPOT';
-    // Calculate amount needed to reach 50/50
-    const targetPerpBalance = balances.totalBalance * 0.5;
-    amount = balances.perpBalance - targetPerpBalance;
-  } else {
-    // Too much in SPOT, transfer to PERP
-    direction = 'SPOT → PERP';
-    // Calculate amount needed to reach 50/50
-    const targetSpotBalance = balances.totalBalance * 0.5;
-    amount = balances.spotBalance - targetSpotBalance;
-  }
-
-  return {
-    direction: direction,
-    amount: amount,
-    fromPerpToSpot: direction === 'PERP → SPOT',
-    fromSpotToPerp: direction === 'SPOT → PERP'
-  };
-}
-
-/**
- * Format balance report for display
- * @param {Object} balances - Balance information
- * @param {Object} balanceCheck - Balance check result
- * @param {Object|null} transferSuggestion - Transfer suggestion
- * @returns {string} Formatted report
- */
-export function formatBalanceReport(balances, balanceCheck, transferSuggestion) {
-  const lines = [];
-
-  lines.push('Balance Distribution:');
-  lines.push(`  PERP Balance: $${balances.perpBalance.toFixed(2)} (${balances.perpPercent.toFixed(1)}%)`);
-  lines.push(`  SPOT Balance: $${balances.spotBalance.toFixed(2)} (${balances.spotPercent.toFixed(1)}%)`);
-  lines.push(`  Total Balance: $${balances.totalBalance.toFixed(2)}`);
-  lines.push('');
-
-  if (balanceCheck.isBalanced) {
-    lines.push(`✅ Balanced (${balanceCheck.target}% ±${balanceCheck.tolerance} points)`);
-  } else {
-    lines.push(`⚠️  Imbalanced (target: ${balanceCheck.target}% ±${balanceCheck.tolerance} points)`);
-    lines.push(`  PERP: ${balanceCheck.perpImbalance > 0 ? '+' : ''}${balanceCheck.perpImbalance.toFixed(1)}% from target`);
-    lines.push(`  SPOT: ${balanceCheck.spotImbalance > 0 ? '+' : ''}${balanceCheck.spotImbalance.toFixed(1)}% from target`);
-
-    if (transferSuggestion) {
-      lines.push('');
-      lines.push('💡 Suggested Transfer:');
-      lines.push(`  Direction: ${transferSuggestion.direction}`);
-      lines.push(`  Amount: $${transferSuggestion.amount.toFixed(2)}`);
-      lines.push('');
-      lines.push('  Do it by hand in the Hyperliquid UI (the API key cannot transfer). The bot opens nothing until then.');
-    }
-  }
-
-  return lines.join('\n');
-}
-
-/**
- * Check balances and generate full report
- * @param {HyperliquidConnector} hyperliquid - Hyperliquid connector
- * @param {number} tolerance - Allowed distance from 50%, in percentage points (default 10 = 40/60). The bot passes
- *   bot.maxBalanceImbalancePercent / 2 (default 5 = 45/55) and holds new positions outside it.
- * @returns {Promise<Object>} Full balance report
- */
-export async function checkAndReportBalances(hyperliquid, tolerance = 10) {
-  const balances = await getBalances(hyperliquid);
-  const balanceCheck = checkBalanceDistribution(balances, tolerance);
-  const transferSuggestion = suggestTransfer(balances, balanceCheck);
-
-  return {
-    balances,
-    balanceCheck,
-    transferSuggestion,
-    report: formatBalanceReport(balances, balanceCheck, transferSuggestion)
-  };
+// Hold when |PERP - SPOT| > maxPct % of the total (10 = 50/50 +-5 points); the transfer that restores 50/50.
+export function rebalanceNeeded({ perpBalance, spotBalance, totalBalance }, maxPct) {
+  const imbalancePercent = totalBalance > 0 ? Math.abs(perpBalance - spotBalance) / totalBalance * 100 : 0;
+  return { imbalancePercent, onHold: imbalancePercent > maxPct, amount: Math.abs(perpBalance - spotBalance) / 2,
+    fromPerpToSpot: perpBalance > spotBalance };
 }

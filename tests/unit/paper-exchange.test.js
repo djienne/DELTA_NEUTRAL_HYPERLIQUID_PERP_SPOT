@@ -217,14 +217,14 @@ test('safety: WebSocket orders go to the simulator, user queries fail closed, no
 
 
 test('operator response delay keeps 440/560 on hold; restart settles once and preserves equity', async () => {
-  const { checkAndReportBalances } = await import('../../utils/balance.js');
+  const { getBalances, rebalanceNeeded } = await import('../../utils/balance.js');
   const { paper, dir } = makePaper();
   const now = Date.now();
   paper.mutate(L => { L.perpUSDC=440; L.spotUSDC=560; });
   fs.writeFileSync(path.join(dir,'rebalance-status.json'),JSON.stringify({rebalanceNeeded:true,direction:'SPOT_TO_PERP',amountUSDC:60,updated:new Date(now).toISOString()}));
   paper.mutate(L=>paper.operator(L,now));
   assert.equal(paper.ledger.spotUSDC,560);
-  assert.equal((await checkAndReportBalances(paper,5)).balanceCheck.isBalanced,false);
+  assert.equal(rebalanceNeeded(await getBalances(paper),10).onHold,true);
   const reloaded=new PaperConnector(config,{dir,fetch:paper.fetch});
   const mids={BTC:'100','@142':'100'};
   await reloaded.loadMeta();

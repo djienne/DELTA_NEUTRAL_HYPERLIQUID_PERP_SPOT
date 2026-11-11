@@ -1,6 +1,6 @@
 import HyperliquidConnector from './hyperliquid.js';
 import { loadState, saveState, hasPosition, getCurrentPosition, recordPosition, closePosition as closePositionState, canClosePosition, getPositionAge, formatPosition, getHistoryStats, setPendingIntent, clearPendingIntent, getStateFilePath, writeJsonAtomic } from './utils/state.js';
-import { checkAndReportBalances } from './utils/balance.js';
+import { getBalances, rebalanceNeeded } from './utils/balance.js';
 import { findBestOpportunities } from './utils/opportunity.js';
 import { openDeltaNeutralPosition, closeDeltaNeutralPosition } from './utils/trade.js';
 import { logStatistics } from './utils/statistics.js';
@@ -498,17 +498,16 @@ async function runCycle() {
  * Check the free PERP/SPOT USDC split. If it is off by more than MAX_BALANCE_IMBALANCE_PERCENT, the bot is ON HOLD
  * (no trade, no exposure) until the user moves USDC by hand. The verdict is written to rebalance-status.json next to
  * the state file, so "is a rebalance needed?" can be answered without reading logs.
- * @returns {Promise<Object>} balance report (utils/balance.js) plus `onHold`
+ * @returns {Promise<Object>} { balances, onHold }
  */
 async function checkRebalance() {
-  const report = await checkAndReportBalances(hyperliquid, MAX_BALANCE_IMBALANCE_PERCENT / 2);
-  const { perpBalance, spotBalance, totalBalance } = report.balances;
-  const transfer = report.transferSuggestion;
-  const onHold = !report.balanceCheck.isBalanced && totalBalance > 0;
+  const balances = await getBalances(hyperliquid);
+  const { perpBalance, spotBalance } = balances;
+  const { imbalancePercent, onHold, amount, fromPerpToSpot } = rebalanceNeeded(balances, MAX_BALANCE_IMBALANCE_PERCENT);
   rebalanceHold = onHold ? (rebalanceHold || { since: new Date().toISOString() }) : null;
 
   const action = onHold
-    ? `Transfer ${transfer.amount.toFixed(2)} USDC from ${transfer.fromPerpToSpot ? 'PERP to SPOT' : 'SPOT to PERP'} ` +
+    ? `Transfer ${amount.toFixed(2)} USDC from ${fromPerpToSpot ? 'PERP to SPOT' : 'SPOT to PERP'} ` +
       `(Hyperliquid UI, account ${hyperliquid.wallet})`
     : 'none';
   const statusFile = path.join(path.dirname(getStateFilePath()), 'rebalance-status.json');
@@ -518,11 +517,11 @@ async function checkRebalance() {
       status: onHold ? 'ACTION_REQUIRED' : 'OK',
       action,
       bot: onHold ? 'ON HOLD: no trades, no exposure until the transfer arrives' : 'balanced, trading normally',
-      direction: onHold ? (transfer.fromPerpToSpot ? 'PERP_TO_SPOT' : 'SPOT_TO_PERP') : null,
-      amountUSDC: onHold ? Number(transfer.amount.toFixed(2)) : 0,
+      direction: onHold ? (fromPerpToSpot ? 'PERP_TO_SPOT' : 'SPOT_TO_PERP') : null,
+      amountUSDC: onHold ? Number(amount.toFixed(2)) : 0,
       perpUSDC: Number(perpBalance.toFixed(2)),
       spotUSDC: Number(spotBalance.toFixed(2)),
-      imbalancePercent: totalBalance > 0 ? Number((Math.abs(perpBalance - spotBalance) / totalBalance * 100).toFixed(1)) : 0,
+      imbalancePercent: Number(imbalancePercent.toFixed(1)),
       maxImbalancePercent: MAX_BALANCE_IMBALANCE_PERCENT,
       since: rebalanceHold?.since ?? null,
       updated: new Date().toISOString()
@@ -538,7 +537,7 @@ async function checkRebalance() {
       `${MAX_BALANCE_IMBALANCE_PERCENT}%. No trades and no exposure until the funds arrive; resumes automatically.`);
     console.log('!'.repeat(80));
   }
-  return { ...report, onHold };
+  return { balances, onHold };
 }
 
 /**
@@ -563,7 +562,6 @@ async function openPosition(opportunity, reason) {
   saveState(state);
 
   try {
-    console.log(balanceReport.report);
     const result = await openDeltaNeutralPosition(hyperliquid, opportunity, balanceReport.balances, config, { verbose: true });
     if (result.success) {
       console.log(`${timestamp()} [5/6] ✅ Opened ${result.symbol}: SHORT ${result.perpSize} PERP @ $${formatPrice(result.perpEntryPrice)}, ` +
