@@ -49,7 +49,7 @@ def main():
     args = ap.parse_args()
     d = Path(args.dir)
     if not (d / 'events.jsonl').exists():
-        raise SystemExit(f'No paper run in {d}/ (start it with: docker compose --profile paper up -d paper-bot)')
+        raise SystemExit(f'No paper run in {d}/ (start it with: docker compose -f docker-compose.paper.yml up -d --build)')
 
     events, bad = load_events(d / 'events.jsonl')
     start = next((e for e in events if e['type'] == 'start'), None)
