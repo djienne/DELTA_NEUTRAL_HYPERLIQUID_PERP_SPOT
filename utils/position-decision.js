@@ -42,3 +42,14 @@ export function switchEdge(incumbentAnnual, candidate, config = {}) {
   const spreadCost = ((candidate.bidAsk?.perpSpreadPercent ?? 0) + (candidate.bidAsk?.spotSpreadPercent ?? 0)) / 100;
   return (candidate.avgFundingRate - incumbentAnnual) * horizonYears - 2 * legFees - spreadCost;
 }
+
+/**
+ * Hourly decision for a held position with 7d-average funding `heldAnnual`: switch to `best` (null = none) if that
+ * gains, else close if closing gains, else hold. Inside the minimum hold (!canClose) only negative funding may act.
+ */
+export function decide(heldAnnual, best, canClose, config = {}) {
+  const switchGain = best ? switchEdge(heldAnnual, best, config) : -Infinity;
+  const wanted = switchGain > 0 ? 'switch' : switchEdge(heldAnnual, null, config) > 0 ? 'close' : null;
+  const allowed = canClose || heldAnnual < 0;
+  return { action: allowed ? wanted : null, switchGain, blockedByHold: wanted !== null && !allowed };
+}

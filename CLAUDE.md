@@ -38,7 +38,8 @@ Never run it (or `emergency-close.js`) from an agent session.
 - `bot.js`: orchestrator. Startup recovery, hourly `runCycle`, 2-minute `displayStatus`, `openPosition`, `closeAndReopen`.
 - `hyperliquid.js`: connector. REST orderbooks (freshness-checked), WebSocket orders with REST fallback, EIP-712 signing,
   weighted REST rate limiter (1200 weight/min), price/size rounding. PERP↔SPOT symbol map: `utils/symbols.js`.
-- `utils/position-decision.js`: the switch rule (`switchEdge`) and the held position's funding signal.
+- `utils/position-decision.js`: the switch rule (`switchEdge`), the hourly hold/switch/close choice (`decide`) and the
+  held position's funding signal.
 - `utils/opportunity.js`: market data → filters → ranking (`findBestOpportunities`).
 - `utils/trade.js`: open/close with parallel PERP+SPOT orders, fill verification, cleanup of orphan legs.
 - `utils/positions.js`: on-chain PERP positions / SPOT balances (dust below `MIN_NOTIONAL_USD` = $10 is ignored everywhere).

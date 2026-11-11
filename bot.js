@@ -6,7 +6,7 @@ import { openDeltaNeutralPosition, closeDeltaNeutralPosition } from './utils/tra
 import { logStatistics, formatMarketTable } from './utils/statistics.js';
 import { autoHedgeAll, analyzeHedgeNeeds, formatHedgeReport } from './utils/hedge.js';
 import { getManagedPerpSymbols, getManagedSpotSymbols, getMaxHedgeMismatchPercent, getStartupCleanupMode } from './utils/risk.js';
-import { getCurrentPositionFundingSignal, switchEdge } from './utils/position-decision.js';
+import { getCurrentPositionFundingSignal, decide } from './utils/position-decision.js';
 import { PaperConnector } from './utils/paper-exchange.js';
 import { formatPrice } from './utils/positions.js';
 import { perpToSpot } from './utils/symbols.js';
@@ -334,20 +334,18 @@ async function runCycle() {
           console.log(`${timestamp()} [4/6] ${signal.reason}. Holding current position.`);
         } else {
           const best = analysis.best && analysis.best.symbol !== position.symbol ? analysis.best : null;
-          const switchGain = best ? switchEdge(signal.fundingRate, best, config) : -Infinity;
-          const closeGain = switchEdge(signal.fundingRate, null, config);
+          const { action, switchGain, blockedByHold } = decide(signal.fundingRate, best, canClose, config);
           console.log(`${timestamp()} [4/6] ${position.symbol} 7d avg funding: ${signal.fundingPercent.toFixed(2)}% APY`);
           if (best) {
             console.log(`${timestamp()} [4/6] Best alternative ${best.symbol}: ${best.avgFundingPercent.toFixed(2)}% APY, expected switch gain ${(switchGain * 100).toFixed(3)}% of notional`);
           }
 
-          const action = switchGain > 0 ? 'switch' : closeGain > 0 ? 'close' : null;
-          if (action && (canClose || signal.fundingRate < 0)) {
+          if (action) {
             const reason = signal.fundingRate < 0 ? 'Funding negative' : 'Better opportunity';
             await closeAndReopen(position, reason, action === 'switch' ? best : null);
             return;
           }
-          console.log(`${timestamp()} [5/6] Holding current position${action ? ' (within minimum hold)' : ''}`);
+          console.log(`${timestamp()} [5/6] Holding current position${blockedByHold ? ' (within minimum hold)' : ''}`);
         }
 
         console.log(`${timestamp()} [6/6] Next check in 1 hour`);
