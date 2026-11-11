@@ -109,6 +109,7 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
   for (const need of snapshot.hedgeNeeds) {
     results.totalProcessed++;
     const result = await createHedge(hyperliquid, need, config, options);
+    if (!result.success && !result.dust) console.error(`[Hedge] ${need.perpSymbol}: hedge failed: ${result.error}`);
     snapshot = await analyzeHedgeNeeds(hyperliquid, scope);
     if (result.success) results.hedged.push(result);
     else if (options.fallbackToClose && !result.unknown) {
@@ -126,6 +127,7 @@ export async function autoHedgeAll(hyperliquid, config, options = {}) {
         assertCompleteFill(close, size, { minFillRatio: getMinFillRatio(config) });
         results.closed.push({ hedgeNeed: remaining, result: close });
       } catch (error) {
+        console.error(`[Hedge] ${remaining.perpSymbol}: fallback close failed: ${error.message}`);
         results.failed.push({ hedgeNeed: remaining, error: error.message });
       }
     } else if (!result.dust) results.failed.push(result);

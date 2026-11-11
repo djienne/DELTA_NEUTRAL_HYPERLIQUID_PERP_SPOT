@@ -58,7 +58,7 @@ function uint64Bytes(value) {
   return Array.from(ethers.getBytes(`0x${BigInt(value).toString(16).padStart(16, '0')}`));
 }
 
-function expectedConnectionId(action, nonce, vaultAddress = null, expiresAfter = null) {
+function expectedConnectionId(action, nonce, vaultAddress = null) {
   const bytes = [
     ...msgpackEncode(action),
     ...uint64Bytes(nonce)
@@ -69,11 +69,6 @@ function expectedConnectionId(action, nonce, vaultAddress = null, expiresAfter =
     bytes.push(...ethers.getBytes(ethers.getAddress(vaultAddress)));
   } else {
     bytes.push(0);
-  }
-
-  if (expiresAfter !== null && expiresAfter !== undefined) {
-    bytes.push(0);
-    bytes.push(...uint64Bytes(expiresAfter));
   }
 
   return ethers.keccak256(new Uint8Array(bytes));
@@ -149,7 +144,7 @@ test('infoRequest uses injected fetch and weighted REST limiter', async () => {
   }]);
 });
 
-test('connection id includes vault address bytes and expiresAfter separator', async () => {
+test('connection id includes vault address bytes', async () => {
   const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
   const action = {
     type: 'order',
@@ -159,36 +154,13 @@ test('connection id includes vault address bytes and expiresAfter separator', as
   const vaultAddress = '0x00000000000000000000000000000000000000ab';
 
   assert.equal(
-    await connector.constructConnectionId(action, 123, null, null),
+    await connector.constructConnectionId(action, 123, null),
     expectedConnectionId(action, 123)
   );
   assert.equal(
-    await connector.constructConnectionId(action, 123, vaultAddress, 456),
-    expectedConnectionId(action, 123, vaultAddress, 456)
+    await connector.constructConnectionId(action, 123, vaultAddress),
+    expectedConnectionId(action, 123, vaultAddress)
   );
-});
-
-test('REST orders forward vaultAddress and expiresAfter', async () => {
-  const payloads = [];
-  const connector = new HyperliquidConnector({
-    wallet: '0x0000000000000000000000000000000000000001',
-    privateKey: `0x${'1'.repeat(64)}`,
-    fetch: async (url, options) => {
-      payloads.push(JSON.parse(options.body));
-      return {
-        ok: true,
-        json: async () => ({ status: 'ok' })
-      };
-    }
-  });
-  const action = { type: 'order', orders: [], grouping: 'na' };
-  const vaultAddress = '0x00000000000000000000000000000000000000ab';
-
-  await connector.createOrderRest(action, 123, vaultAddress, 456);
-
-  assert.equal(payloads.length, 1);
-  assert.equal(payloads[0].expiresAfter, 456);
-  assert.equal(payloads[0].vaultAddress, ethers.getAddress(vaultAddress));
 });
 
 test('is_vault=true in hyperliquid.env signs orders and leverage for the sub-account', async () => {
@@ -212,10 +184,6 @@ is_vault=True
   const sentVaults = [];
   connector.getAssetId = async () => 0;
   connector.getAssetInfo = () => ({ szDecimals: 3 });
-  connector.createOrderRest = async (action, nonce, vaultAddress) => {
-    sentVaults.push(vaultAddress);
-    return { status: 'ok' };
-  };
   connector.fetchJsonWithTimeout = async (url, init) => {
     sentVaults.push(JSON.parse(init.body).vaultAddress);
     return { status: 'ok' };
@@ -225,7 +193,7 @@ is_vault=True
   await connector.createMarketOrder('BTC', 'sell', 0.001);
   await updateLeverage(connector, 'BTC', 1, false);
 
-  assert.deepEqual(sentVaults, [subAccount, ethers.getAddress(subAccount)]);
+  assert.deepEqual(sentVaults, [ethers.getAddress(subAccount), ethers.getAddress(subAccount)]);
 });
 
 test('nextNonce is strictly monotonic within the same millisecond', () => {
@@ -273,7 +241,7 @@ test('REST order parse failure is treated as unknown outcome', async () => {
   const action = { type: 'order', orders: [], grouping: 'na' };
 
   await assert.rejects(
-    () => connector.createOrderRest(action, 123, null, null, { coin: 'BTC' }),
+    () => connector.createOrderRest(action, 123, { coin: 'BTC' }),
     UnknownOrderOutcomeError
   );
 });
@@ -291,7 +259,7 @@ test('disconnect rejects pending order requests as unknown outcomes', async () =
     orders: [{ a: 0, b: true, p: '100', s: '1', r: false, t: { limit: { tif: 'Ioc' } } }],
     grouping: 'na'
   };
-  const pending = connector.createOrderWebSocket(action, 123, null, null, { coin: 'BTC' });
+  const pending = connector.createOrderWebSocket(action, 123, { coin: 'BTC' });
   await new Promise(resolve => setImmediate(resolve));
   connector.disconnect();
 

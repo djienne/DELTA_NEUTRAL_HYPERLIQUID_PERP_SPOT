@@ -17,6 +17,7 @@ export function exchange(perps = { BTC: -1 }, spots = { UBTC: 1 }) {
     getAssetInfo() { return { szDecimals: 4 }; },
     async getFreshBidAsk() { return { bid: 99.99, ask: 100.01, mid: 100, timestamp: Date.now() }; },
     roundSize: HyperliquidConnector.prototype.roundSize,
+    postAction: HyperliquidConnector.prototype.postAction, signedPayload: HyperliquidConnector.prototype.signedPayload,
     async signAction() { return {}; },
     async fetchJsonWithTimeout(url, init) { e.updates.push(JSON.parse(init.body).action); return e.leverageResponse ?? { status: 'ok' }; },
     async getUserFundingHistory() { return { accumulated: { BTC: 0 } }; },

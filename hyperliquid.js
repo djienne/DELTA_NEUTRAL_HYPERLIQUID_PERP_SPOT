@@ -794,7 +794,7 @@ class HyperliquidConnector {
    * Sign an action using EIP-712
    * Based on Hyperliquid Python SDK sign_l1_action
    */
-  async signAction(action, nonce, vaultAddress = null, expiresAfter = null) {
+  async signAction(action, nonce, vaultAddress = null) {
     if (!this.signer) {
       throw new Error('Signer not initialized. Private key required.');
     }
@@ -821,8 +821,8 @@ class HyperliquidConnector {
     const source = this.testnet ? 'b' : 'a';
 
     // Create connection ID hash
-    // This is keccak256 of msgpack encoded data + nonce + vault indicator + optional expiration
-    const connectionId = await this.constructConnectionId(action, nonce, vaultAddress, expiresAfter);
+    // This is keccak256 of msgpack encoded data + nonce + vault indicator
+    const connectionId = await this.constructConnectionId(action, nonce, vaultAddress);
 
     const agentMessage = {
       source,
@@ -842,9 +842,9 @@ class HyperliquidConnector {
 
   /**
    * Construct connection ID for EIP-712 signing
-   * This is a keccak256 hash of msgpack-encoded action + nonce + vault + expiration
+   * This is a keccak256 hash of msgpack-encoded action + nonce + vault (no expiresAfter: the bot never sets one)
    */
-  async constructConnectionId(action, nonce, vaultAddress, expiresAfter) {
+  async constructConnectionId(action, nonce, vaultAddress) {
     // Encode action with msgpack
     const actionBytes = msgpackEncode(action);
 
@@ -862,12 +862,6 @@ class HyperliquidConnector {
       dataToHash.push(...ethers.getBytes(this.normalizeVaultAddress(vaultAddress)));
     } else {
       dataToHash.push(0);
-    }
-
-    // Add optional expiration separator and uint64 big-endian bytes
-    if (expiresAfter !== null && expiresAfter !== undefined) {
-      dataToHash.push(0);
-      dataToHash.push(...this.numberToUint64Bytes(expiresAfter, 'expiresAfter'));
     }
 
     // Hash the combined data
@@ -1007,35 +1001,37 @@ class HyperliquidConnector {
 
     // Try WebSocket first if connected, otherwise use REST
     if (this.connected && !this.marketDataHub) {
-      return await this.createOrderWebSocket(action, nonce, this.vaultAddress, options.expiresAfter, orderContext);
+      return await this.createOrderWebSocket(action, nonce, orderContext);
     } else {
-      return await this.createOrderRest(action, nonce, this.vaultAddress, options.expiresAfter, orderContext);
+      return await this.createOrderRest(action, nonce, orderContext);
     }
+  }
+
+  // The signed /exchange body. A sub-account/vault must be named in every action, or the API key acts on its master.
+  async signedPayload(action, nonce) {
+    const payload = { action, nonce, signature: await this.signAction(action, nonce, this.vaultAddress) };
+    if (this.vaultAddress) payload.vaultAddress = this.normalizeVaultAddress(this.vaultAddress);
+    return payload;
+  }
+
+  // The one REST /exchange call. unknownOnTimeout (orders): a timeout or unreadable reply is an UnknownOrderOutcomeError.
+  async postAction(action, nonce, { unknownOnTimeout = false, context = {} } = {}) {
+    return this.fetchJsonWithTimeout(this.exchangeUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(await this.signedPayload(action, nonce))
+    }, { timeoutMs: this.orderTimeoutMs, unknownOnTimeout, context });
   }
 
   /**
    * Create order via WebSocket
    */
-  async createOrderWebSocket(action, nonce, vaultAddress = null, expiresAfter = null, context = {}) {
+  async createOrderWebSocket(action, nonce, context = {}) {
     if (!this.connected) {
       throw new Error('Not connected to WebSocket');
     }
 
-    const signature = await this.signAction(action, nonce, vaultAddress, expiresAfter);
-
-    const payload = {
-      action,
-      nonce,
-      signature
-    };
-
-    if (vaultAddress) {
-      payload.vaultAddress = this.normalizeVaultAddress(vaultAddress);
-    }
-
-    if (expiresAfter !== null && expiresAfter !== undefined) {
-      payload.expiresAfter = expiresAfter;
-    }
+    const payload = await this.signedPayload(action, nonce);
 
     return new Promise((resolve, reject) => {
       const id = ++this.requestId;
@@ -1090,41 +1086,10 @@ class HyperliquidConnector {
   /**
    * Create order via REST API
    */
-  async createOrderRest(action, nonce, vaultAddress = null, expiresAfter = null, context = {}) {
-    const signature = await this.signAction(action, nonce, vaultAddress, expiresAfter);
-
-    const payload = {
-      action,
-      nonce,
-      signature
-    };
-
-    if (vaultAddress) {
-      payload.vaultAddress = this.normalizeVaultAddress(vaultAddress);
-    }
-
-    if (expiresAfter !== null && expiresAfter !== undefined) {
-      payload.expiresAfter = expiresAfter;
-    }
-
-    try {
-      const result = await this.fetchJsonWithTimeout(this.exchangeUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload)
-      }, {
-        timeoutMs: this.orderTimeoutMs,
-        unknownOnTimeout: true,
-        context: { ...context, nonce, transport: 'rest' }
-      });
-      console.log('[Hyperliquid] Order placed via REST:', result);
-      return result;
-    } catch (error) {
-      console.error('[Hyperliquid] REST order error:', error.message);
-      throw error;
-    }
+  async createOrderRest(action, nonce, context = {}) {
+    const result = await this.postAction(action, nonce, { unknownOnTimeout: true, context: { ...context, nonce, transport: 'rest' } });
+    console.log('[Hyperliquid] Order placed via REST:', result);
+    return result;
   }
 
   /**
