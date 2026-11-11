@@ -6,6 +6,7 @@ import path from 'node:path';
 import HyperliquidConnector from '../../hyperliquid.js';
 import { PaperConnector, walkBook, liquidationPx } from '../../utils/paper-exchange.js';
 import { openDeltaNeutralPosition, closeDeltaNeutralPosition } from '../../utils/trade.js';
+import { getBalances, rebalanceNeeded } from '../../utils/balance.js';
 
 const HOUR = 3600000;
 const MINUTE = 60000;
@@ -152,7 +153,7 @@ test('outage liquidation: a candle high above the 1x short liquidation price rem
   assert.ok(paper.ledger.pendingFunding.every(f => f.hour <= h));
 });
 
-test('simulated manual transfer: does what rebalance-status.json asks, one at a time; lands after the delay, counts in equity', () => {
+test('simulated manual transfer: does what rebalance-status.json asks, one at a time; lands once after the delay, survives a restart, counts in equity', async () => {
   const { paper, dir } = makePaper();
   const mids = { BTC: '100', '@142': '100' };
   const now = Date.now();
@@ -168,19 +169,23 @@ test('simulated manual transfer: does what rebalance-status.json asks, one at a 
   const started = paper.mutate(L => paper.operator(L, now));
   assert.equal(started[0].amount, 100);
   assert.equal(paper.ledger.spotUSDC, 600);
-  assert.equal(paper.ledger.perpUSDC, 400);                      // operator has not acted: bot still sees 400 / 600 and holds
+  assert.equal(rebalanceNeeded(await getBalances(paper), 10).onHold, true);  // operator has not acted: bot sees 400 / 600, holds
   assert.equal(paper.equity(mids).equity, 1000);                  // no fake drawdown
   assert.deepEqual(paper.mutate(L => paper.operator(L, now)), []);  // one transfer at a time
 
-  paper.mutate(L => paper.landTransfers(L, now + 59 * MINUTE));
-  assert.equal(paper.ledger.perpUSDC, 400);
-  paper.mutate(L => paper.landTransfers(L, now + 60 * MINUTE));
-  assert.equal(paper.ledger.perpUSDC, 500);
-  assert.deepEqual(paper.mutate(L => paper.operator(L, now + 60 * MINUTE)), []);  // request older than the landing: stale
+  const reloaded = new PaperConnector(config, { dir, fetch: paper.fetch });  // restart: the pending transfer survives
+  assert.equal(reloaded.equity(mids).pendingOperatorTransfer, true);
+  reloaded.mutate(L => reloaded.landTransfers(L, now + 59 * MINUTE));
+  assert.equal(reloaded.ledger.perpUSDC, 400);
+  reloaded.mutate(L => reloaded.landTransfers(L, now + 60 * MINUTE));
+  reloaded.mutate(L => reloaded.landTransfers(L, now + 61 * MINUTE));  // settles once
+  assert.deepEqual([reloaded.ledger.perpUSDC, reloaded.ledger.spotUSDC, reloaded.equity(mids).equity], [500, 500, 1000]);
+  assert.equal(reloaded.equity(mids).pendingOperatorTransfer, false);
+  assert.deepEqual(reloaded.mutate(L => reloaded.operator(L, now + 60 * MINUTE)), []);  // request older than the landing: stale
 
-  paper.mutate(L => { L.spotUSDC = 50; });
+  reloaded.mutate(L => { L.spotUSDC = 50; });
   ask('SPOT_TO_PERP', 100, now + 61 * MINUTE);                    // a new request, more than the source holds
-  assert.equal(paper.mutate(L => paper.operator(L, now + 61 * MINUTE))[0].amount, 50);
+  assert.equal(reloaded.mutate(L => reloaded.operator(L, now + 61 * MINUTE))[0].amount, 50);
 });
 
 test('WebSocket reconnects call connect() again: the paper ticker is not duplicated', async () => {
@@ -215,27 +220,3 @@ test('safety: WebSocket orders go to the simulator, user queries fail closed, no
   assert.ok(!market.requests.some(r => r.url.includes('/exchange')));
 });
 
-
-test('operator response delay keeps 440/560 on hold; restart settles once and preserves equity', async () => {
-  const { getBalances, rebalanceNeeded } = await import('../../utils/balance.js');
-  const { paper, dir } = makePaper();
-  const now = Date.now();
-  paper.mutate(L => { L.perpUSDC=440; L.spotUSDC=560; });
-  fs.writeFileSync(path.join(dir,'rebalance-status.json'),JSON.stringify({rebalanceNeeded:true,direction:'SPOT_TO_PERP',amountUSDC:60,updated:new Date(now).toISOString()}));
-  paper.mutate(L=>paper.operator(L,now));
-  assert.equal(paper.ledger.spotUSDC,560);
-  assert.equal(rebalanceNeeded(await getBalances(paper),10).onHold,true);
-  const reloaded=new PaperConnector(config,{dir,fetch:paper.fetch});
-  const mids={BTC:'100','@142':'100'};
-  await reloaded.loadMeta();
-  assert.equal(reloaded.equity(mids).equity,1000);
-  assert.equal(reloaded.equity(mids).pendingOperatorTransfer,true);
-  assert.equal(reloaded.equity(mids).transit,0);
-  reloaded.mutate(L=>reloaded.landTransfers(L,now+59*MINUTE));
-  assert.equal(reloaded.ledger.perpUSDC,440);
-  reloaded.mutate(L=>reloaded.landTransfers(L,now+60*MINUTE));
-  reloaded.mutate(L=>reloaded.landTransfers(L,now+61*MINUTE));
-  assert.equal(reloaded.ledger.perpUSDC,500);assert.equal(reloaded.ledger.spotUSDC,500);
-  assert.equal(reloaded.equity(mids).equity,1000);
-  assert.equal(reloaded.equity(mids).pendingOperatorTransfer,false);
-});

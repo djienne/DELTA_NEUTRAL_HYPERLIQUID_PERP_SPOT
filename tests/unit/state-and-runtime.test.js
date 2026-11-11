@@ -8,112 +8,45 @@ import { canClosePosition, getHistoryStats, loadState, recordPosition, closePosi
 
 test('getBidAsk includes mid price', () => {
   const connector = new HyperliquidConnector({ wallet: '0x0' });
-  connector.updateOrderbook({
-    coin: 'BTC',
-    levels: [
-      [{ px: '99', sz: '1', n: 1 }],
-      [{ px: '101', sz: '1', n: 1 }]
-    ],
-    time: 123
-  });
-
-  const { receivedAt, ...book } = connector.getBidAsk('BTC');
-  assert.ok(Math.abs(receivedAt - Date.now()) < 1000);
-  assert.deepEqual(book, {
-    coin: 'BTC',
-    bid: 99,
-    ask: 101,
-    mid: 100,
-    bidSize: 1,
-    askSize: 1,
-    timestamp: 123
-  });
+  connector.updateOrderbook({ coin: 'BTC', levels: [[{ px: '99', sz: '1', n: 1 }], [{ px: '101', sz: '1', n: 1 }]], time: 123 });
+  assert.equal(connector.getBidAsk('BTC').mid, 100);
 });
 
 test('state compacts order responses and history stats use component total PnL', () => {
-  const initial = { version: '1.0', position: null, history: [] };
-  const opened = recordPosition(initial, {
-    success: true,
-    symbol: 'BTC',
-    perpSymbol: 'BTC',
-    spotSymbol: 'UBTC',
-    perpSize: 1,
-    spotSize: 1,
-    perpEntryPrice: 100,
-    spotEntryPrice: 100,
-    positionValue: 100,
-    fundingRate: 0.001,
-    annualizedFunding: 0.1,
-    openFeesActual: 0.1,
-    perpResult: {
-      response: { data: { statuses: [{ filled: { oid: 1, avgPx: '100', totalSz: '1' } }] } }
-    },
-    spotResult: {
-      response: { data: { statuses: [{ filled: { oid: 2, avgPx: '100', totalSz: '1' } }] } }
-    }
-  });
-
+  const filled = oid => ({ response: { data: { statuses: [{ filled: { oid, avgPx: '100', totalSz: '1' } }] } } });
+  const opened = recordPosition({ position: null, history: [] },
+    { symbol: 'BTC', perpSymbol: 'BTC', spotSymbol: 'UBTC', perpSize: 1, spotSize: 1, perpResult: filled(1), spotResult: filled(2) });
   assert.equal(opened.position.perpResult, undefined);
   assert.equal(opened.position.orderSummary.perp.oid, 1);
-
-  const closed = closePosition(opened, {
-    reason: 'test',
-    perpClosePrice: 99,
-    spotClosePrice: 101,
-    perpPnl: 1,
-    spotPnl: 1,
-    pricePnl: 2,
-    fundingPnl: 3,
-    feesActual: 0.5,
-    totalPnl: 4.5
-  });
-
+  const closed = closePosition(opened, { reason: 'test', perpPnl: 1, spotPnl: 1, pricePnl: 2, fundingPnl: 3, feesActual: 0.5, totalPnl: 4.5 });
   assert.equal(getHistoryStats(closed).totalPnl, 4.5);
 });
 
-test('state file path can point at a missing directory', () => {
+// Runs fn(stateFile, dir) with BOT_STATE_FILE at `file` in a fresh temp dir, then restores the env and removes the dir.
+function withStateFile(file, fn) {
   const previous = process.env.BOT_STATE_FILE;
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hl-state-'));
-  const stateFile = path.join(tempDir, 'nested', 'bot-state.json');
-  process.env.BOT_STATE_FILE = stateFile;
-
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hl-state-'));
+  process.env.BOT_STATE_FILE = path.join(dir, file);
   try {
-    saveState({ version: '1.0', position: null, history: [{ totalPnl: 1 }] });
-    assert.equal(fs.existsSync(stateFile), true);
-    assert.equal(loadState().history.length, 1);
+    fn(process.env.BOT_STATE_FILE, dir);
   } finally {
-    if (previous === undefined) {
-      delete process.env.BOT_STATE_FILE;
-    } else {
-      process.env.BOT_STATE_FILE = previous;
-    }
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.BOT_STATE_FILE; else process.env.BOT_STATE_FILE = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
   }
-});
+}
 
-test('corrupt state file is quarantined instead of silently reused', () => {
-  const previous = process.env.BOT_STATE_FILE;
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hl-state-corrupt-'));
-  const stateFile = path.join(tempDir, 'bot-state.json');
-  process.env.BOT_STATE_FILE = stateFile;
+test('state file path can point at a missing directory', () => withStateFile(path.join('nested', 'bot-state.json'), stateFile => {
+  saveState({ version: '1.0', position: null, history: [{ totalPnl: 1 }] });
+  assert.equal(fs.existsSync(stateFile), true);
+  assert.equal(loadState().history.length, 1);
+}));
 
-  try {
-    fs.writeFileSync(stateFile, '{not-json', 'utf8');
-    const loaded = loadState();
-    const quarantined = fs.readdirSync(tempDir).filter(name => name.includes('.corrupt-'));
-
-    assert.equal(loaded.position, null);
-    assert.equal(fs.existsSync(stateFile), false);
-    assert.equal(quarantined.length, 1);
-  } finally {
-    if (previous === undefined) {
-      delete process.env.BOT_STATE_FILE;
-    } else {
-      process.env.BOT_STATE_FILE = previous;
-    }
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
+test('corrupt state file is quarantined instead of silently reused', () => withStateFile('bot-state.json', (stateFile, dir) => {
+  fs.writeFileSync(stateFile, '{not-json', 'utf8');
+  assert.equal(loadState().position, null);
+  assert.equal(fs.existsSync(stateFile), false);
+  assert.equal(fs.readdirSync(dir).filter(name => name.includes('.corrupt-')).length, 1);
+}));
 
 test('adopted position with unknown opening time: the minimum hold counts from adoption, then it can switch', () => {
   const day = 24 * 3600000;

@@ -4,6 +4,8 @@ import { filterOpportunities } from '../../utils/opportunity.js';
 import { getCurrentPositionFundingSignal, switchEdge } from '../../utils/position-decision.js';
 import { fetchWithConcurrencyLimit } from '../../utils/spread.js';
 
+const THRESHOLDS = { maxSpreadPercent: 0.15, maxPerpSpotSpreadPercent: 0.5, minVolumeUSDC: 75_000_000, minFundingRatePercent: 5 };
+
 function baseMarketData(overrides = {}) {
   return {
     bidAskSpreads: [
@@ -33,12 +35,7 @@ test('opportunity filtering rejects missing bid-ask leg data instead of treating
     bidAskSpreads: [
       { symbol: 'BTC', isSpot: false, spreadPercent: 0.02, mid: 100 }
     ]
-  }), {
-    maxSpreadPercent: 0.15,
-    maxPerpSpotSpreadPercent: 0.5,
-    minVolumeUSDC: 75_000_000,
-    minFundingRatePercent: 5
-  });
+  }), THRESHOLDS);
 
   assert.equal(result.opportunities.length, 0);
   assert.equal(result.rejected.missingData.length, 1);
@@ -46,12 +43,7 @@ test('opportunity filtering rejects missing bid-ask leg data instead of treating
 });
 
 test('opportunity filtering keeps valid complete spread data', () => {
-  const result = filterOpportunities(baseMarketData(), {
-    maxSpreadPercent: 0.15,
-    maxPerpSpotSpreadPercent: 0.5,
-    minVolumeUSDC: 75_000_000,
-    minFundingRatePercent: 5
-  });
+  const result = filterOpportunities(baseMarketData(), THRESHOLDS);
 
   assert.equal(result.opportunities.length, 1);
   assert.equal(result.opportunities[0].symbol, 'BTC');
@@ -61,12 +53,7 @@ test('opportunity filtering keeps valid complete spread data', () => {
 test('opportunity filtering rejects non-finite 7d funding', () => {
   const result = filterOpportunities(baseMarketData({
     fundingRates: [{ symbol: 'BTC', fundingRate: 0.001, annualizedRate: NaN, history: { count: 168, avg: { annualized: NaN } } }]
-  }), {
-    maxSpreadPercent: 0.15,
-    maxPerpSpotSpreadPercent: 0.5,
-    minVolumeUSDC: 75_000_000,
-    minFundingRatePercent: 5
-  });
+  }), THRESHOLDS);
 
   assert.equal(result.opportunities.length, 0);
   assert.equal(result.rejected.funding.length, 1);

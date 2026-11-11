@@ -8,20 +8,10 @@ test('startup cleanup mode is allowlisted', () => {
   assert.equal(getStartupCleanupMode({ risk: { startupCleanupMode: 'unexpected' } }), 'hedge-only');
 });
 
-test('managed spot symbols derive from configured pairs and current state', () => {
-  const managed = getManagedSpotSymbols({
-    trading: { pairs: ['BTC', 'ETH'] }
-  }, { spotSymbol: 'PURR' });
-
-  assert.deepEqual([...managed].sort(), ['PURR', 'UBTC', 'UETH']);
-});
-
-test('managed perp symbols derive from configured pairs and current state', () => {
-  const managed = getManagedPerpSymbols({
-    trading: { pairs: ['BTC', 'ETH'] }
-  }, { perpSymbol: 'PURR' });
-
-  assert.deepEqual([...managed].sort(), ['BTC', 'ETH', 'PURR']);
+test('managed perp and spot symbols derive from configured pairs and current state', () => {
+  const config = { trading: { pairs: ['BTC', 'ETH'] } };
+  assert.deepEqual([...getManagedSpotSymbols(config, { spotSymbol: 'PURR' })].sort(), ['PURR', 'UBTC', 'UETH']);
+  assert.deepEqual([...getManagedPerpSymbols(config, { perpSymbol: 'PURR' })].sort(), ['BTC', 'ETH', 'PURR']);
 });
 
 test('delta-neutral analysis separates true hedges from imbalanced matches', () => {

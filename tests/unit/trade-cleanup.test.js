@@ -4,33 +4,11 @@ import { closeDeltaNeutralPosition, openDeltaNeutralPosition } from '../../utils
 import { getOrderFees } from '../../utils/order-fill.js';
 import { exchange } from './fake-exchange.js';
 
-const baseOpportunity = {
-  symbol: 'BTC',
-  bidAsk: {
-    perpMid: 100,
-    spotMid: 100
-  },
-  funding: {
-    fundingRate: 0.001
-  },
-  avgFundingRate: 0.1
-};
-
-const baseBalances = {
-  perpBalance: 1000,
-  spotBalance: 1000
-};
-
+const baseOpportunity = { symbol: 'BTC', bidAsk: { perpMid: 100, spotMid: 100 }, funding: { fundingRate: 0.001 }, avgFundingRate: 0.1 };
+const baseBalances = { perpBalance: 1000, spotBalance: 1000 };
 const baseConfig = {
-  trading: {
-    minOrderSizeUSD: { BTC: 20 },
-    balanceUtilizationPercent: 10,
-    maxSlippagePercent: 5
-  },
-  risk: {
-    minFillRatio: 0.999,
-    maxHedgeMismatchPercent: 10
-  }
+  trading: { minOrderSizeUSD: { BTC: 20 }, balanceUtilizationPercent: 10, maxSlippagePercent: 5 },
+  risk: { minFillRatio: 0.999, maxHedgeMismatchPercent: 10 }
 };
 
 test('order fee accounting reads only known fill fee fields', () => {
@@ -54,36 +32,16 @@ test('order fee accounting reads only known fill fee fields', () => {
 });
 
 // Orders fill in full at 100 unless a test's execution says otherwise (fake-exchange.js); call 0 is the perp leg.
-test('SPOT cleanup after PERP failure is not reduce-only and requires connector pricing', async () => {
-  const hyperliquid = exchange({}, {});
-  hyperliquid.execution = c => c.symbol === 'BTC' ? { reject: true } : { size: c.size, price: 100 };
-
-  await assert.rejects(
-    () => openDeltaNeutralPosition(hyperliquid, baseOpportunity, baseBalances, baseConfig),
-    /PERP order failed/
-  );
-
-  const cleanup = hyperliquid.calls.at(-1);
-  assert.equal(cleanup.symbol, 'UBTC');
-  assert.equal(cleanup.side, 'sell');
-  assert.equal(cleanup.options.isSpot, true);
-  assert.equal(cleanup.options.reduceOnly, false);
-});
-
-test('PERP cleanup after SPOT failure is reduce-only and requires connector pricing', async () => {
-  const hyperliquid = exchange({}, {});
-  hyperliquid.execution = c => c.symbol === 'UBTC' ? { reject: true } : { size: c.size, price: 100 };
-
-  await assert.rejects(
-    () => openDeltaNeutralPosition(hyperliquid, baseOpportunity, baseBalances, baseConfig),
-    /SPOT order failed/
-  );
-
-  const cleanup = hyperliquid.calls.at(-1);
-  assert.equal(cleanup.symbol, 'BTC');
-  assert.equal(cleanup.side, 'buy');
-  assert.equal(cleanup.options.isSpot, false);
-  assert.equal(cleanup.options.reduceOnly, true);
+test('a rejected open leg closes the filled one: SPOT cleanup is not reduce-only, PERP cleanup is', async () => {
+  for (const [rejected, error, cleanup] of [
+    ['BTC', /PERP order failed/, { symbol: 'UBTC', side: 'sell', isSpot: true, reduceOnly: false }],
+    ['UBTC', /SPOT order failed/, { symbol: 'BTC', side: 'buy', isSpot: false, reduceOnly: true }]]) {
+    const hyperliquid = exchange({}, {});
+    hyperliquid.execution = c => c.symbol === rejected ? { reject: true } : { size: c.size, price: 100 };
+    await assert.rejects(() => openDeltaNeutralPosition(hyperliquid, baseOpportunity, baseBalances, baseConfig), error);
+    const { symbol, side, options } = hyperliquid.calls.at(-1);
+    assert.deepEqual({ symbol, side, isSpot: options.isSpot, reduceOnly: options.reduceOnly }, cleanup);
+  }
 });
 
 test('imbalanced partial fills are closed with actual filled sizes', async () => {
