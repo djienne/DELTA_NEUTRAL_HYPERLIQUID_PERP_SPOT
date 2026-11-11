@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { ethers } from 'ethers';
 import HyperliquidConnector from '../../hyperliquid.js';
 import { UnknownOrderOutcomeError } from '../../utils/order-fill.js';
@@ -52,26 +51,6 @@ class FakeWebSocket extends EventEmitter {
   close() {
     this.closed = true;
   }
-}
-
-function uint64Bytes(value) {
-  return Array.from(ethers.getBytes(`0x${BigInt(value).toString(16).padStart(16, '0')}`));
-}
-
-function expectedConnectionId(action, nonce, vaultAddress = null) {
-  const bytes = [
-    ...msgpackEncode(action),
-    ...uint64Bytes(nonce)
-  ];
-
-  if (vaultAddress) {
-    bytes.push(1);
-    bytes.push(...ethers.getBytes(ethers.getAddress(vaultAddress)));
-  } else {
-    bytes.push(0);
-  }
-
-  return ethers.keccak256(new Uint8Array(bytes));
 }
 
 test('health monitoring uses app-level ping and handles app-level pong', async () => {
@@ -134,23 +113,16 @@ test('infoRequest uses injected fetch and weighted REST limiter', async () => {
   }]);
 });
 
-test('connection id includes vault address bytes', async () => {
-  const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
-  const action = {
-    type: 'order',
-    orders: [{ a: 0, b: true, p: '100', s: '1', r: false, t: { limit: { tif: 'Ioc' } } }],
-    grouping: 'na'
-  };
-  const vaultAddress = '0x00000000000000000000000000000000000000ab';
-
-  assert.equal(
-    await connector.constructConnectionId(action, 123, null),
-    expectedConnectionId(action, 123)
-  );
-  assert.equal(
-    await connector.constructConnectionId(action, 123, vaultAddress),
-    expectedConnectionId(action, 123, vaultAddress)
-  );
+// Known answers from the official Python SDK (hyperliquid-python-sdk 0.24.0): sign_l1_action(wallet, action, vault,
+// 1700000000000, expires_after=None, is_mainnet=True), wallet = the SDK tests' public key 0x0123...0123.
+test('signAction gives the official SDK signature on mainnet, with and without a vault', async () => {
+  const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: '0x0123456789012345678901234567890123456789012345678901234567890123' });
+  const action = { type: 'order', orders: [{ a: 0, b: true, p: '100', s: '1', r: false, t: { limit: { tif: 'Ioc' } } }], grouping: 'na' };
+  for (const [vault, r, s, v] of [
+    [null, '0xc251b36f03073f300a3b87796f7528a5c3e13ec5da67f908a9abe23f7ff3406e', '0x73f0be0130d726791ff9d4cb5090e87b04c1275ba84286200bc562f9e29ba68d', 27],
+    ['0x00000000000000000000000000000000000000ab', '0xc66cdfb26eac0694ba5aa008b46e7feaf6b9e471cddab29dde2b97e4bedb38a1', '0x345141a74dd72aa7edecf972d443afecf7736943f9dce4feb80f996d3cfae083', 28]]) {
+    assert.deepEqual(await connector.signAction(action, 1700000000000, vault), { r, s, v });
+  }
 });
 
 test('is_vault=true in hyperliquid.env signs orders and leverage for the sub-account', async () => {
