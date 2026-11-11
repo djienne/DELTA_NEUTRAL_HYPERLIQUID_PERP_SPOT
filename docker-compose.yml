@@ -27,14 +27,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # Health check (optional - checks if bot process is running)
-    healthcheck:
-      test: ["CMD", "pgrep", "-f", "node"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
   # Paper trading (dry run) lives in docker-compose.paper.yml, its own project: fleet scripts start only that one.
 
 # Optional: Add a network for future expansion (e.g., monitoring)
