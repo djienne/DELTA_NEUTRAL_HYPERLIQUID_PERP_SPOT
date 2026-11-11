@@ -72,7 +72,6 @@ test('delta-neutral analysis separates true hedges from imbalanced matches', () 
 test('exposure below the $10 order minimum is ignored as untradeable dust', async () => {
   const hyperliquid = {
     wallet: '0x1',
-    async getMeta() { return { universe: [{ name: 'BTC' }, { name: 'ETH' }] }; },
     async getAllMids() { return { BTC: '100', ETH: '10' }; },
     async infoRequest({ type }) {
       if (type === 'clearinghouseState') {
