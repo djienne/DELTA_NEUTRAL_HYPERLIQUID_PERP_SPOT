@@ -1,6 +1,5 @@
 import WebSocket from 'ws';
 import fs from 'fs';
-import { EventEmitter } from 'events';
 import { SlidingWindowRateLimiter } from './utils/rate-limiter.js';
 import { ethers } from 'ethers';
 import dotenv from 'dotenv';
@@ -9,10 +8,8 @@ import { UnknownOrderOutcomeError } from './utils/order-fill.js';
 
 const CREDENTIALS_FILE = 'hyperliquid.env';  // wallet_address, private_key, is_vault (relative to the working dir)
 
-class HyperliquidConnector extends EventEmitter {
+class HyperliquidConnector {
   constructor(options = {}) {
-    super();
-
     this.wsUrl = options.wsUrl || 'wss://api.hyperliquid.xyz/ws';
     this.restUrl = options.restUrl || 'https://api.hyperliquid.xyz/info';
     this.exchangeUrl = options.exchangeUrl || 'https://api.hyperliquid.xyz/exchange';
@@ -63,23 +60,13 @@ class HyperliquidConnector extends EventEmitter {
     this.connectionTimeout = null; // Connection timeout timer
     this.lastPongReceived = Date.now();
 
-    // REST API fallback
-    this.useRestFallback = false;
-    this.restPollInterval = options.restPollInterval || 1000;
-    this.restPollTimer = null;
+    // WebSocket recovery probe after the reconnect attempts run out (orders use REST meanwhile)
     this.fallbackReconnectInterval = options.fallbackReconnectInterval || 60000;
     this.fallbackReconnectTimer = null;
 
-    // Staleness monitoring for automatic REST fallback
-    this.stalenessThreshold = options.stalenessThreshold || 60000; // 60 seconds
-    this.stalenessTimer = null;
     this.maxOrderbookAgeMs = options.maxOrderbookAgeMs || 10000;
     this.infoTimeoutMs = options.infoTimeoutMs || 15000;
     this.orderTimeoutMs = options.orderTimeoutMs || 20000;
-
-    // Periodic REST refresh (every 5s) to supplement WebSocket
-    this.restRefreshInterval = options.restRefreshInterval || 5000; // 5 seconds
-    this.restRefreshTimer = null;
 
     // Orderbook data cache
     this.orderbooks = new Map();
@@ -89,24 +76,11 @@ class HyperliquidConnector extends EventEmitter {
     this.pendingRequests = new Map();
     this.lastNonce = options.lastNonce || 0;
 
-    // Subscriptions
-    this.subscriptions = new Set();
-
-    // Rate limiters
-    // WebSocket: max 2000 messages per minute, max 100 inflight
-    this.wsRateLimiter = new SlidingWindowRateLimiter({
-      maxRequests: 1800, // Set to 1800 to have some buffer
-      windowMs: 60000 // 1 minute
-    });
-
     // REST: max 1200 weight per minute (l2Book has weight 2)
     this.restRateLimiter = new SlidingWindowRateLimiter({
       maxRequests: 1200, // counted in request weight (see infoRequest)
       windowMs: 60000 // 1 minute
     });
-
-    // Track inflight WebSocket requests
-    this.maxInflightRequests = options.maxInflightRequests || 90; // Max 100, use 90 for buffer
   }
 
   nextNonce() {
@@ -133,7 +107,6 @@ class HyperliquidConnector extends EventEmitter {
           this.connected = true;
           this.reconnecting = false;
           this.reconnectAttempts = 0;
-          this.useRestFallback = false;
 
           // Clear connection timeout
           if (this.connectionTimeout) {
@@ -143,11 +116,6 @@ class HyperliquidConnector extends EventEmitter {
 
           // Start health monitoring
           this.startHealthMonitoring();
-
-          // Resubscribe to previous subscriptions
-          this.resubscribe();
-
-          this.emit('connected');
           resolve();
         });
 
@@ -160,10 +128,7 @@ class HyperliquidConnector extends EventEmitter {
         });
 
         this.ws.on('error', (error) => {
-          console.error('[Hyperliquid] WebSocket error:', error.message);
-          // EventEmitter throws on an 'error' nobody listens to: a DNS failure or reset would kill the process
-          // instead of letting the close handler reconnect / fall back to REST.
-          if (this.listenerCount('error') > 0) this.emit('error', error);
+          console.error('[Hyperliquid] WebSocket error:', error.message);  // the close handler reconnects
         });
 
         this.ws.on('close', () => {
@@ -171,8 +136,6 @@ class HyperliquidConnector extends EventEmitter {
           this.connected = false;
           this.stopHealthMonitoring();  // also clears connectionTimeout, so settle connect() here
           reject(new Error('WebSocket closed before opening'));  // no-op once open; else a failed attempt hangs forever
-
-          this.emit('disconnected');
 
           // Attempt to reconnect only if not intentionally disconnected
           if (!this.reconnecting && !this.intentionalDisconnect) {
@@ -210,26 +173,6 @@ class HyperliquidConnector extends EventEmitter {
     }
 
     this.ws.send(JSON.stringify(message));
-  }
-
-  sendL2BookSubscription(coin) {
-    this.sendWebSocketMessage({
-      method: 'subscribe',
-      subscription: {
-        type: 'l2Book',
-        coin
-      }
-    });
-  }
-
-  sendL2BookUnsubscription(coin) {
-    this.sendWebSocketMessage({
-      method: 'unsubscribe',
-      subscription: {
-        type: 'l2Book',
-        coin
-      }
-    });
   }
 
   buildL2BookPayload(coin, options = {}) {
@@ -335,12 +278,6 @@ class HyperliquidConnector extends EventEmitter {
     try {
       const message = JSON.parse(data.toString());
 
-      // Handle subscription responses
-      if (message.channel === 'subscriptionResponse') {
-        console.log('[Hyperliquid] Subscription confirmed:', message.data);
-        return;
-      }
-
       if (message.channel === 'pong') {
         this.handlePong();
         return;
@@ -367,21 +304,8 @@ class HyperliquidConnector extends EventEmitter {
           }
         }
 
-        // Handle l2Book responses
-        if (response.type === 'info' && response.payload?.type === 'l2Book') {
-          const bookData = response.payload.data;
-          this.updateOrderbook(bookData);
-        }
-
         return;
       }
-
-      // Handle subscription data updates
-      if (message.channel === 'l2Book') {
-        this.updateOrderbook(message.data);
-        return;
-      }
-
     } catch (error) {
       console.error('[Hyperliquid] Error parsing message:', error);
     }
@@ -430,7 +354,6 @@ class HyperliquidConnector extends EventEmitter {
     };
 
     this.orderbooks.set(coin, orderbook);
-    this.emit('orderbook', orderbook);
   }
 
   /**
@@ -459,118 +382,6 @@ class HyperliquidConnector extends EventEmitter {
   }
 
   /**
-   * Subscribe to orderbook updates for a coin
-   */
-  async subscribeOrderbook(coin) {
-    if (!this.connected && !this.useRestFallback) {
-      throw new Error('Not connected');
-    }
-
-    // Add to subscriptions
-    this.subscriptions.add(coin);
-
-    if (this.useRestFallback) {
-      // Start REST polling if not already started
-      if (!this.restPollTimer) {
-        this.startRestPolling();
-      }
-      return;
-    }
-
-    try {
-      this.sendL2BookSubscription(coin);
-    } catch (error) {
-      console.error(`[Hyperliquid] Failed to subscribe to l2Book for ${coin}:`, error.message);
-    }
-
-    // Request initial snapshot via WebSocket
-    try {
-      await this.requestL2Book(coin);
-    } catch (error) {
-      console.error(`[Hyperliquid] Failed to get initial orderbook for ${coin}:`, error.message);
-    }
-
-    // Start staleness monitoring if not already running
-    // This will detect if WebSocket stops sending updates and fall back to REST
-    if (!this.stalenessTimer) {
-      this.startStalenessMonitoring();
-    }
-
-    // Start periodic REST refresh if this is the first subscription
-    // This supplements WebSocket with periodic REST updates every 5s
-    if (this.subscriptions.size === 1 && !this.restRefreshTimer) {
-      this.startPeriodicRestRefresh();
-    }
-  }
-
-  /**
-   * Request L2 orderbook via WebSocket post
-   */
-  async requestL2Book(coin, options = {}) {
-    if (this.marketDataHub) return await this.requestL2BookRest(coin, options);
-    // Check inflight request limit
-    if (this.pendingRequests.size >= this.maxInflightRequests) {
-      throw new Error('Too many inflight requests');
-    }
-
-    // Check rate limit
-    if (!this.wsRateLimiter.canRequest()) {
-      throw new Error('Rate limit exceeded');
-    }
-
-    return new Promise((resolve, reject) => {
-      if (!this.connected) {
-        reject(new Error('Not connected'));
-        return;
-      }
-
-      // Consume rate limit token
-      if (!this.wsRateLimiter.tryRequest()) {
-        reject(new Error('Rate limit exceeded'));
-        return;
-      }
-
-      const id = ++this.requestId;
-
-      const request = {
-        method: 'post',
-        id,
-        request: {
-          type: 'info',
-          payload: this.buildL2BookPayload(coin, options)
-        }
-      };
-
-      // Store pending request with timeout
-      const timeoutId = setTimeout(() => {
-        if (this.pendingRequests.has(id)) {
-          this.pendingRequests.delete(id);
-          reject(new Error('Request timeout'));
-        }
-      }, 10000); // Increased to 10 seconds
-
-      this.pendingRequests.set(id, {
-        resolve,
-        reject,
-        timeout: timeoutId,
-        kind: 'info',
-        context: { requestType: 'l2Book', coin }
-      });
-
-      // Send request
-      try {
-        this.ws.send(JSON.stringify(request));
-      } catch (error) {
-        if (this.pendingRequests.has(id)) {
-          clearTimeout(this.pendingRequests.get(id).timeout);
-          this.pendingRequests.delete(id);
-        }
-        reject(error);
-      }
-    });
-  }
-
-  /**
    * Request L2 orderbook via REST API
    */
   async requestL2BookRest(coin, options = {}) {
@@ -579,152 +390,6 @@ class HyperliquidConnector extends EventEmitter {
     } catch (error) {
       console.error(`[Hyperliquid] REST API error for ${coin}:`, error.message);
       throw error;
-    }
-  }
-
-  /**
-   * Start REST API polling fallback
-   * @param {boolean} temporary - If true, don't check useRestFallback flag (for staleness fallback)
-   */
-  startRestPolling(temporary = false) {
-    if (this.restPollTimer) {
-      return;
-    }
-
-    console.log('[Hyperliquid] Starting REST API fallback polling' + (temporary ? ' (temporary)' : ''));
-
-    this.restPollTimer = setInterval(async () => {
-      // For permanent fallback, check the flag
-      // For temporary fallback (staleness), always run
-      if (!temporary && !this.useRestFallback) {
-        this.stopRestPolling();
-        return;
-      }
-
-      // Poll all subscribed coins
-      for (const coin of this.subscriptions) {
-        try {
-          const data = await this.requestL2BookRest(coin);
-          this.updateOrderbook({
-            coin,
-            levels: data.levels,
-            time: data.time
-          });
-        } catch (error) {
-          console.error(`[Hyperliquid] REST polling error for ${coin}:`, error);
-        }
-      }
-    }, this.restPollInterval);
-  }
-
-  /**
-   * Stop REST API polling
-   */
-  stopRestPolling() {
-    if (this.restPollTimer) {
-      clearInterval(this.restPollTimer);
-      this.restPollTimer = null;
-    }
-  }
-
-  /**
-   * Start periodic REST refresh (every 5s) to supplement WebSocket
-   * This ensures prices stay fresh even if WebSocket updates miss or stale
-   */
-  startPeriodicRestRefresh() {
-    if (this.restRefreshTimer) {
-      return; // Already running
-    }
-
-    console.log('[Hyperliquid] Starting periodic REST refresh (every 5s)');
-
-    this.restRefreshTimer = setInterval(async () => {
-      // Refresh all subscribed coins
-      for (const coin of this.subscriptions) {
-        try {
-          const data = await this.requestL2BookRest(coin);
-          this.updateOrderbook({
-            coin,
-            levels: data.levels,
-            time: data.time
-          });
-        } catch (error) {
-          // Silently fail - WebSocket is primary, this is just a supplement
-          if (!error.message.includes('Rate limit')) {
-            console.error(`[Hyperliquid] REST refresh error for ${coin}:`, error.message);
-          }
-        }
-      }
-    }, this.restRefreshInterval);
-  }
-
-  /**
-   * Stop periodic REST refresh
-   */
-  stopPeriodicRestRefresh() {
-    if (this.restRefreshTimer) {
-      clearInterval(this.restRefreshTimer);
-      this.restRefreshTimer = null;
-      console.log('[Hyperliquid] Stopped periodic REST refresh');
-    }
-  }
-
-  /**
-   * Start monitoring for stale orderbook data
-   * Falls back to REST polling if WebSocket data becomes stale
-   */
-  startStalenessMonitoring() {
-    if (this.stalenessTimer) {
-      return;
-    }
-
-    console.log('[Hyperliquid] Starting staleness monitoring');
-
-    this.stalenessTimer = setInterval(() => {
-      if (!this.connected || this.useRestFallback) {
-        return;
-      }
-
-      const now = Date.now();
-      let anyStale = false;
-
-      // Check if any subscribed orderbook is stale
-      for (const coin of this.subscriptions) {
-        const orderbook = this.orderbooks.get(coin);
-
-        if (!orderbook) {
-          continue;
-        }
-
-        const age = now - orderbook.receivedAt;
-
-        if (age > this.stalenessThreshold) {
-          console.warn(`[Hyperliquid] Orderbook for ${coin} is stale (${Math.round(age / 1000)}s old)`);
-          anyStale = true;
-        }
-      }
-
-      // If any orderbook is stale, start temporary REST fallback
-      if (anyStale && !this.restPollTimer) {
-        console.log('[Hyperliquid] WebSocket data stale, starting temporary REST fallback');
-        this.startRestPolling(true); // temporary=true
-      }
-
-      // If all orderbooks are fresh and REST polling is active (and not permanent), stop it
-      if (!anyStale && this.restPollTimer && !this.useRestFallback) {
-        console.log('[Hyperliquid] WebSocket data resumed, stopping temporary REST fallback');
-        this.stopRestPolling();
-      }
-    }, 10000); // Check every 10 seconds
-  }
-
-  /**
-   * Stop staleness monitoring
-   */
-  stopStalenessMonitoring() {
-    if (this.stalenessTimer) {
-      clearInterval(this.stalenessTimer);
-      this.stalenessTimer = null;
     }
   }
 
@@ -803,11 +468,8 @@ class HyperliquidConnector extends EventEmitter {
 
     if (this.reconnectAttempts > this.maxReconnectAttempts) {
       console.error('[Hyperliquid] Max reconnect attempts reached, switching to REST fallback');
-      this.useRestFallback = true;
       this.reconnecting = false;
-      this.startRestPolling();
       this.startFallbackReconnectProbe();
-      this.emit('fallback', 'rest');
       return;
     }
 
@@ -831,35 +493,6 @@ class HyperliquidConnector extends EventEmitter {
     }, delay);
   }
 
-  /**
-   * Resubscribe to all previous subscriptions
-   */
-  resubscribe() {
-    console.log(`[Hyperliquid] Resubscribing to ${this.subscriptions.size} coins`);
-
-    for (const coin of this.subscriptions) {
-      this.subscribeOrderbook(coin).catch(error => {
-        console.error(`[Hyperliquid] Error resubscribing to ${coin}:`, error);
-      });
-    }
-  }
-
-  /**
-   * Unsubscribe from orderbook updates
-   */
-  unsubscribe(coin) {
-    if (this.connected && !this.useRestFallback) {
-      try {
-        this.sendL2BookUnsubscription(coin);
-      } catch (error) {
-        console.error(`[Hyperliquid] Failed to unsubscribe from l2Book for ${coin}:`, error.message);
-      }
-    }
-
-    this.subscriptions.delete(coin);
-    this.orderbooks.delete(coin);
-  }
-
   startFallbackReconnectProbe() {
     if (this.fallbackReconnectTimer || this.intentionalDisconnect) {
       return;
@@ -874,8 +507,6 @@ class HyperliquidConnector extends EventEmitter {
         console.log('[Hyperliquid] Probing WebSocket recovery from REST fallback');
         this.reconnectAttempts = 0;
         await this.connect();
-        this.useRestFallback = false;
-        this.stopRestPolling();
         this.stopFallbackReconnectProbe();
       } catch (error) {
         console.error('[Hyperliquid] WebSocket recovery probe failed:', error.message);
@@ -899,10 +530,7 @@ class HyperliquidConnector extends EventEmitter {
     this.intentionalDisconnect = true; // Prevent auto-reconnect
     this.reconnecting = false;
     this.stopHealthMonitoring();
-    this.stopRestPolling();
     this.stopFallbackReconnectProbe();
-    this.stopPeriodicRestRefresh();
-    this.stopStalenessMonitoring();
 
     if (this.ws) {
       this.ws.close();
@@ -910,7 +538,6 @@ class HyperliquidConnector extends EventEmitter {
     }
 
     this.connected = false;
-    this.subscriptions.clear();
     this.orderbooks.clear();
     for (const [id, pending] of this.pendingRequests.entries()) {
       if (pending.timeout) {

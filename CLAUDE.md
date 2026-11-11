@@ -36,8 +36,8 @@ Never run it (or `emergency-close.js`) from an agent session.
 ## Architecture
 
 - `bot.js`: orchestrator. Startup recovery, hourly `runCycle`, 2-minute `displayStatus`, `openPosition`, `closeAndReopen`.
-- `hyperliquid.js`: connector. WebSocket orderbooks with REST fallback, EIP-712 signing, weighted REST rate limiter
-  (1200 weight/min), price/size rounding, PERP↔SPOT symbol mapping.
+- `hyperliquid.js`: connector. REST orderbooks (freshness-checked), WebSocket orders with REST fallback, EIP-712 signing,
+  weighted REST rate limiter (1200 weight/min), price/size rounding, PERP↔SPOT symbol mapping.
 - `utils/position-decision.js`: the switch rule (`switchEdge`) and the held position's funding signal.
 - `utils/opportunity.js`: market data → filters → ranking (`findBestOpportunities`).
 - `utils/trade.js`: open/close with parallel PERP+SPOT orders, fill verification, cleanup of orphan legs.

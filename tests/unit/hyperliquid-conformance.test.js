@@ -19,7 +19,7 @@ test('central market data preserves full-precision requests and never falls back
     calls.push({ url, options });
     return { coin: 'BTC', time: 123, levels: [[], []] };
   };
-  await connector.requestL2Book('BTC', { nSigFigs: null });
+  await connector.requestL2BookRest('BTC', { nSigFigs: null });
   assert.equal(calls[0].url, 'http://hub:8766/book?coin=BTC');
   assert.equal(calls[0].options.method, 'GET');
   assert.equal(connector.wsUrl, 'ws://hub:8766/ws?consumer=delta-neutral');
@@ -87,35 +87,6 @@ test('l2Book payload defaults to 5 significant figures', () => {
     coin: 'BTC',
     nSigFigs: 5
   });
-});
-
-test('subscription lifecycle sends documented l2Book frames', async () => {
-  const connector = new HyperliquidConnector({ wallet: '0x0', privateKey: null });
-  const ws = new FakeWebSocket();
-  const snapshots = [];
-
-  connector.connected = true;
-  connector.ws = ws;
-  connector.requestL2Book = async (coin) => {
-    snapshots.push(coin);
-    return {};
-  };
-
-  await connector.subscribeOrderbook('BTC');
-  connector.unsubscribe('BTC');
-  connector.stopPeriodicRestRefresh();
-  connector.stopStalenessMonitoring();
-
-  assert.deepEqual(ws.sent[0], {
-    method: 'subscribe',
-    subscription: { type: 'l2Book', coin: 'BTC' }
-  });
-  assert.deepEqual(snapshots, ['BTC']);
-  assert.deepEqual(ws.sent[1], {
-    method: 'unsubscribe',
-    subscription: { type: 'l2Book', coin: 'BTC' }
-  });
-  assert.equal(connector.subscriptions.has('BTC'), false);
 });
 
 test('health monitoring uses app-level ping and handles app-level pong', async () => {
