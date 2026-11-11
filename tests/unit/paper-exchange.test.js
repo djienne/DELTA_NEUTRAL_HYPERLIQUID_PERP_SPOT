@@ -22,7 +22,7 @@ const dirs = [];
 after(() => dirs.forEach(dir => fs.rmSync(dir, { recursive: true, force: true })));
 
 // Public market data served by a fake fetch (BTC perp + UBTC spot "@142", book 99.9 / 100.1)
-function makePaper(market = {}) {
+function makePaper(market = {}, paperConfig = config) {
   const m = {
     mids: { BTC: '100', '@142': '100' },
     book: { coin: 'BTC', levels: [[{ px: '99.9', sz: '10', n: 1 }], [{ px: '100.1', sz: '10', n: 1 }]] },
@@ -50,7 +50,7 @@ function makePaper(market = {}) {
   };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'paper-'));
   dirs.push(dir);
-  const paper = new PaperConnector(config, { dir, fetch });
+  const paper = new PaperConnector(paperConfig, { dir, fetch });
   paper.restRateLimiter.waitForSlot = async () => {};
   return { paper, market: m, dir };
 }
@@ -91,6 +91,19 @@ test('spot buy is grossed up for its token fee and nets out held dust: net spot 
     const close = await closeDeltaNeutralPosition(paper, { ...open, perpSymbol: 'BTC', spotSymbol: 'UBTC', openTime: Date.now() }, config);
     assert.equal(close.accountingComplete, true);
   }
+});
+
+test('P&L counts the fee paid, read from the fills, not the config rate (spot buy fee paid in the token)', async () => {
+  // A discounted account: the exchange charges less than the bot's config rates
+  const { paper, dir } = makePaper({}, { ...config, trading: { ...config.trading, takerFeeRate: 0.0003, spotTakerFeeRate: 0.0005 } });
+  const opportunity = { symbol: 'BTC', bidAsk: { perpMid: 100, spotMid: 100 }, funding: { fundingRate: 0.0000125 }, avgFundingRate: 0.11 };
+  const open = await openDeltaNeutralPosition(paper, opportunity, { perpBalance: 500, spotBalance: 500 }, config);
+  const close = await closeDeltaNeutralPosition(paper, { ...open, perpSymbol: 'BTC', spotSymbol: 'UBTC', openTime: Date.now() }, config);
+  assert.ok(paper.fills.some(f => f.feeToken === 'UBTC'), 'the spot buy pays in UBTC');
+  const paid = events(dir).filter(e => e.type === 'fill').map(f => f.feeUSD);  // the two open fills come first
+  assert.deepEqual([open.openFeesEstimated, close.feesEstimated], [0, 0]);
+  assert.ok(Math.abs(open.openFeesActual - paid[0] - paid[1]) < 1e-9, `${open.openFeesActual} vs ${paid}`);
+  assert.ok(Math.abs(close.feesActual - paid.reduce((a, b) => a + b)) < 1e-9);
 });
 
 test('walkBook fills level by level up to the limit; exchange order checks; responses carry no fee field (like live)', async () => {

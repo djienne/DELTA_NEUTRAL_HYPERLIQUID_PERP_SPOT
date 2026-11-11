@@ -3,7 +3,7 @@ import { SlidingWindowRateLimiter } from './utils/rate-limiter.js';
 import { ethers } from 'ethers';
 import dotenv from 'dotenv';
 import { encode as msgpackEncode } from '@msgpack/msgpack';
-import { UnknownOrderOutcomeError } from './utils/order-fill.js';
+import { UnknownOrderOutcomeError, getFilledStatus } from './utils/order-fill.js';
 
 const CREDENTIALS_FILE = 'hyperliquid.env';  // wallet_address, private_key, is_vault (relative to the working dir)
 
@@ -694,7 +694,44 @@ class HyperliquidConnector {
       nonce
     };
 
-    return await this.createOrderRest(action, nonce, orderContext);
+    const result = await this.createOrderRest(action, nonce, orderContext);
+    // The reply has no fee: read the fee paid from the order's fills. Orders need a book at most 10 s old by the host
+    // clock (getFreshBidAsk), so a minute before the nonce covers a host clock running ahead of the fill time.
+    const filled = getFilledStatus(result);
+    if (filled) {
+      const fee = await this.getOrderFeeUsd(filled, coin, nonce - 60000);
+      if (fee !== null) filled.feeUsd = fee;  // read by getKnownFee (utils/order-fill.js); null: trade.js estimates it
+    }
+    return result;
+  }
+
+  /**
+   * Fee paid by a filled order, in USDC, tier/staking/referral discounts included: one userFillsByTime call (weight 20,
+   * +1 per 20 rows). `fee` is in `feeToken` and includes any builder fee: USDC on perps and spot sells, the received
+   * token on a spot buy, valued here at its fill price (USDC-quoted pairs only). Never throws, the order is placed:
+   * null when the rows are unreadable or do not add up to the filled size.
+   */
+  async getOrderFeeUsd(filled, coin, startTime) {
+    try {
+      const rows = (await this.infoRequest({ type: 'userFillsByTime', user: this.wallet, startTime }, 20))
+        .filter(f => f.oid === filled.oid);
+      let size = 0;
+      let fee = 0;
+      for (const f of rows) {
+        if (f.feeToken !== 'USDC' && f.feeToken !== coin) throw new Error(`fee in ${f.feeToken}`);
+        size += parseFloat(f.sz);
+        fee += parseFloat(f.fee) * (f.feeToken === 'USDC' ? 1 : parseFloat(f.px));
+      }
+      const total = parseFloat(filled.totalSz);
+      if (!(Math.abs(size - total) <= total * 1e-9) || !Number.isFinite(fee)) {
+        throw new Error(`its fills add up to ${size} of ${total}`);
+      }
+      console.log(`[Hyperliquid] Fee paid on oid ${filled.oid}: ${fee} USDC (${rows.length} fill(s))`);
+      return fee;
+    } catch (error) {
+      console.warn(`[Hyperliquid] Fee of oid ${filled.oid} unknown (${error.message}); P&L estimates it at the config rate`);
+      return null;
+    }
   }
 
   // The signed /exchange body. A sub-account/vault must be named in every action, or the API key acts on its master.

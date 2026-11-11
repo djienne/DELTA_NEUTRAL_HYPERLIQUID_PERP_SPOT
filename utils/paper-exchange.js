@@ -10,7 +10,7 @@
  *    figures (integers exempt) or (6 perp | 8 spot) - szDecimals decimals, size x mid < $10, or reduceOnly on spot.
  *    IOC fill = walk the live L2 book (full precision) up to the order's limit price; level-by-level VWAP, partial fills
  *    possible; unfilled rest cancelled. Response shape as the exchange: {filled: {totalSz, avgPx, oid}} (no fee field,
- *    like live) or {error}.
+ *    like live) or {error}. The fill, with its fee, is served as a userFillsByTime row, where the connector reads it.
  *  - Fees (config trading.takerFeeRate / spotTakerFeeRate): perp in USDC; spot taken from the RECEIVED asset
  *    (token on buy, USDC on sell). Token balances are truncated to the token's weiDecimals.
  *  - Isolated perp margin: margin = notional / leverage, moved out of free (withdrawable) USDC.
@@ -162,6 +162,9 @@ export class PaperConnector extends HyperliquidConnector {
     }
     this.lastCatchUp = 0;
     this.lastEquityAt = 0;
+    // userFillsByTime rows, in memory: the connector reads an order's fills right after it, so a restart forgets
+    // nothing it needs. Grows by one small row per order (a few per trade).
+    this.fills = [];
   }
 
   // ---------------------------------------------------------------- persistence
@@ -453,7 +456,11 @@ export class PaperConnector extends HyperliquidConnector {
     if (error) return reject(error);
 
     this.event(fill);
-    return { filled: { totalSz: filled.toFixed(asset.szDecimals), avgPx: String(Number(avgPx.toPrecision(8))), oid: fill.oid } };
+    const reply = { totalSz: filled.toFixed(asset.szDecimals), avgPx: String(Number(avgPx.toPrecision(8))), oid: fill.oid };
+    const inToken = asset.isSpot && isBuy;  // a spot buy pays its fee in the received token
+    this.fills.push({ coin: asset.bookCoin, px: reply.avgPx, sz: reply.totalSz, side: isBuy ? 'B' : 'A', time: Date.now(),
+      oid: fill.oid, fee: String(inToken ? filled * this.fees.spot : fill.feeUSD), feeToken: inToken ? asset.coin : 'USDC' });
+    return { filled: reply };
   }
 
   // ---------------------------------------------------------------- simulated account reads
@@ -467,6 +474,9 @@ export class PaperConnector extends HyperliquidConnector {
         .sort((a, b) => a.time - b.time)
         .slice(0, 500)  // API page size
         .map(r => ({ time: r.time, hash: '0x0', delta: { type: 'funding', coin: r.coin, usdc: String(r.usdc), szi: String(r.szi), fundingRate: String(r.fundingRate), nSamples: null } }));
+    }
+    if (payload.type === 'userFillsByTime') {
+      return this.fills.filter(f => f.time >= payload.startTime && f.time <= (payload.endTime ?? Infinity)).slice(0, 2000);
     }
     if (payload.user) {
       throw new Error(`[Paper] user query "${payload.type}" is not simulated`);  // fail closed, never ask mainnet

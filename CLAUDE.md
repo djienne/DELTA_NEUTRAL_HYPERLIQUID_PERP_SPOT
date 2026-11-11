@@ -101,6 +101,9 @@ cost = 2 × (perp fee + spot fee) + candidate perp + spot spread      (close-onl
 
 - `status: "ok"` only means the request was valid. Check `response.data.statuses[0]` for `filled` / `error` / `resting`
   (`utils/order-fill.js`).
+- The order reply has no fee. After a fill, `createMarketOrder` reads the fee paid from that order's `userFillsByTime`
+  rows (one weight-20 call; `fee` is in `feeToken`: USDC, or the bought token on a spot buy, valued at the fill price)
+  into `filled.feeUsd`, the P&L's actual fee. If that read fails, P&L estimates the fee at the config rate.
 - PERP and SPOT legs go out together (`Promise.all`). If one leg fails, the filled leg is closed from on-chain state.
 - Closes are sized from **on-chain** exposure, not the state file (spot fees are taken in the received token). A close
   counts as done only when the chain shows the managed symbols flat.
