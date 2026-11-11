@@ -236,10 +236,12 @@ For a sub-account, create the API key on the master account. Move USDC between t
 ```
 bot.js (main loop)
   ├─ state.js → bot-state.json (persistence)
+  ├─ recovery.js → on-chain check, adoption, pendingIntent reconciliation
   ├─ balance.js → PERP/SPOT USDC split (hold + rebalance-status.json)
   ├─ opportunity.js → funding + volume + spreads
   ├─ trade.js → parallel PERP+SPOT orders
-  └─ hedge.js → fix unhedged / mismatched legs
+  ├─ hedge.js → fix unhedged / mismatched legs
+  └─ report.js → status screen (position part)
 ```
 
 **Utilities**: `position-decision.js` (switch rule), `funding.js`, `volume.js`, `spread.js`, `arbitrage.js`, `positions.js`, `leverage.js`, `risk.js`

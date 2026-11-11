@@ -5,11 +5,13 @@ import { findBestOpportunities } from './utils/opportunity.js';
 import { openDeltaNeutralPosition, closeDeltaNeutralPosition } from './utils/trade.js';
 import { logStatistics, formatMarketTable } from './utils/statistics.js';
 import { autoHedgeAll, analyzeHedgeNeeds, formatHedgeReport } from './utils/hedge.js';
-import { getManagedPerpSymbols, getManagedSpotSymbols, getMaxHedgeMismatchPercent, getStartupCleanupMode } from './utils/risk.js';
+import { getStartupCleanupMode } from './utils/risk.js';
 import { getCurrentPositionFundingSignal, decide } from './utils/position-decision.js';
 import { PaperConnector } from './utils/paper-exchange.js';
 import { formatPrice } from './utils/positions.js';
 import { perpToSpot } from './utils/symbols.js';
+import { verifyPositionOnChain, confirmNoManagedExposure, adoptOnChainPair, managedScope, reconcilePendingIntent } from './utils/recovery.js';
+import { colors, formatKnown, printPositionStatus } from './utils/report.js';
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -63,10 +65,6 @@ function timestamp() {
   return `[${new Date().toLocaleTimeString()}]`;
 }
 
-function formatKnown(value, decimals = 2) {
-  return Number.isFinite(value) ? value.toFixed(decimals) : 'unknown';
-}
-
 /**
  * Initialize bot
  */
@@ -111,98 +109,6 @@ async function initialize() {
 }
 
 /**
- * Check for existing delta-neutral position on-chain
- * (In case bot was restarted and state is out of sync)
- */
-async function verifyPositionOnChain(connector = hyperliquid, botState = state) {
-  const snapshot = await analyzeHedgeNeeds(connector, managedScope(botState?.position, botState?.pendingIntent));
-  const { analysis, symbols } = snapshot;
-  for (const d of snapshot.dust) console.log(`[Bot] Dust: ${d.symbol} ${d.size} ($${d.valueUSD.toFixed(4)}), not executable alone`);
-  if (!symbols.length) return { status: 'none', pair: null, analysis, snapshot };
-  const expected = botState?.position?.symbol ?? botState?.pendingIntent?.symbol;
-  if (symbols.length > 1 || (expected && symbols[0] !== expected)) {
-    console.error('[Bot] Managed exposure is ambiguous or differs from state; manual resolution required');
-    return { status: 'ambiguous', pair: null, analysis, snapshot };
-  }
-  const pair = [...analysis.deltaNeutralPairs, ...analysis.imbalancedPairs].find(p => p.isDeltaNeutral);
-  return { status: pair && !snapshot.needsHedging ? 'delta_neutral' : 'imbalanced', pair, analysis, snapshot };
-}
-async function confirmNoManagedExposure(confirmations = 3, delayMs = 750, connector = hyperliquid, botState = state) {
-  for (let i = 0; i < confirmations; i++) {
-    const onChainPosition = await verifyPositionOnChain(connector, botState);
-    if (onChainPosition.status !== 'none') {
-      return false;
-    }
-    if (i < confirmations - 1) {
-      await new Promise(resolve => setTimeout(resolve, delayMs));
-    }
-  }
-  return true;
-}
-
-function adoptOnChainPair(pair, botState, reason, persist = saveState) {
-  const previous = botState.position?.symbol === pair.symbol ? botState.position : null;
-  const position = previous ? {
-    ...previous, perpSize: pair.perpSize, spotSize: pair.spotSize,
-    accountingComplete: previous.accountingComplete !== false && previous.perpSize === pair.perpSize && previous.spotSize === pair.spotSize
-  } : {
-    success: true, symbol: pair.symbol, perpSymbol: pair.symbol,
-    spotSymbol: perpToSpot(pair.symbol),
-    perpSize: pair.perpSize, spotSize: pair.spotSize,
-    perpEntryPrice: pair.perpPosition.entryPrice > 0 ? pair.perpPosition.entryPrice : null,
-    spotEntryPrice: null, positionValue: pair.perpPosition.positionValue,
-    fundingRate: null, annualizedFunding: null, openFeesActual: 0, openFeesEstimated: 0,
-    openTime: botState.pendingIntent?.type === 'opening' ? botState.pendingIntent.createdAt : null,
-    adoptedAt: Date.now(),  // starts the minimum-hold clock when the real opening time is unknown
-    accountingComplete: false
-  };
-  const next = recordPosition(botState, position);
-  persist(next);
-  console.log(`[Bot] Adopted ${pair.symbol} (${reason}); unknown historical costs remain unavailable`);
-  return next;
-}
-
-function managedScope(position, intent = state?.pendingIntent) {
-  return {
-    managedSpotSymbols: [...new Set([...getManagedSpotSymbols(config, position), ...(intent?.spotSymbol ? [intent.spotSymbol] : [])])],
-    managedPerpSymbols: [...new Set([...getManagedPerpSymbols(config, position), ...(intent?.perpSymbol ? [intent.perpSymbol] : [])])],
-    maxHedgeMismatchPercent: getMaxHedgeMismatchPercent(config)
-  };
-}
-
-async function reconcilePendingIntent(connector, botState, persist = saveState) {
-  const intent = botState?.pendingIntent;
-  if (!intent) return botState;
-  if (intent.type === 'closing') {
-    const position = botState.position?.symbol === intent.symbol ? botState.position : {
-      symbol: intent.symbol, perpSymbol: intent.perpSymbol, spotSymbol: intent.spotSymbol,
-      openTime: null, perpEntryPrice: null, spotEntryPrice: null, accountingComplete: false
-    };
-    // A prior process/cycle may have filled one leg. Never recreate it, or guess its exit price.
-    const result = await closeDeltaNeutralPosition(connector, position, config,
-      { reason: intent.reason || 'Recovered close', accountingComplete: false, verbose: true });
-    const next = closePositionState({ ...botState, position }, result);
-    persist(next);
-    return next;
-  }
-  if (intent.type !== 'opening') throw new Error(`Unknown pending intent ${intent.type}`);
-  let chain = await verifyPositionOnChain(connector, botState);
-  if (chain.status === 'none') {
-    if (!await confirmNoManagedExposure(3, 750, connector, botState)) return botState;
-    const next = clearPendingIntent(botState);
-    persist(next);
-    return next;
-  }
-  if (chain.status === 'imbalanced') {
-    await autoHedgeAll(connector, config, { fallbackToClose: false, ...managedScope(botState.position, intent) });
-    chain = await verifyPositionOnChain(connector, botState);
-  }
-  if (chain.status === 'delta_neutral' && chain.pair.symbol === intent.symbol) {
-    return adoptOnChainPair(chain.pair, botState, 'recovered opening', persist);
-  }
-  return botState;
-}
-/**
  * Clean up imbalanced positions at startup
  * Uses the hedge utility to automatically hedge or close unhedged positions
  */
@@ -211,7 +117,7 @@ async function cleanupImbalancedPositions() {
   console.log();
 
   try {
-    if ((await verifyPositionOnChain()).status === 'ambiguous') return;
+    if ((await verifyPositionOnChain(hyperliquid, state)).status === 'ambiguous') return;
     const startupCleanupMode = getStartupCleanupMode(config);
     const scope = managedScope(hasPosition(state) ? getCurrentPosition(state) : null);
 
@@ -288,10 +194,10 @@ async function runCycle() {
       console.log();
 
       // Verify position still exists on-chain
-      const onChainPosition = await verifyPositionOnChain();
+      const onChainPosition = await verifyPositionOnChain(hyperliquid, state);
 
       if (onChainPosition.status === 'none') {
-        const confirmedFlat = await confirmNoManagedExposure();
+        const confirmedFlat = await confirmNoManagedExposure(3, 750, hyperliquid, state);
         if (!confirmedFlat) {
           console.log(`${timestamp()} [Bot] Managed exposure reappeared during flat confirmation. Keeping state and halting this cycle.`);
           return;
@@ -357,7 +263,7 @@ async function runCycle() {
       console.log();
 
       // Verify no position on-chain
-      const onChainPosition = await verifyPositionOnChain();
+      const onChainPosition = await verifyPositionOnChain(hyperliquid, state);
 
       if (onChainPosition.status !== 'none') {
         console.log(`${timestamp()} [Bot] Found position on-chain but not in state!`);
@@ -465,7 +371,7 @@ async function checkRebalance() {
  * unless exposure may exist on-chain, which the next start (reconcilePendingIntent) then resolves.
  */
 async function openPosition(opportunity, reason) {
-  if ((await verifyPositionOnChain()).status !== 'none') throw new Error('Managed exposure blocks a new opening');
+  if ((await verifyPositionOnChain(hyperliquid, state)).status !== 'none') throw new Error('Managed exposure blocks a new opening');
   const balanceReport = await checkRebalance();
   if (balanceReport.onHold) {
     return;
@@ -494,7 +400,7 @@ async function openPosition(opportunity, reason) {
     console.log(`${timestamp()} [5/6] Failed to open position: ${result.error}`);
   } catch (error) {
     console.error(`${timestamp()} [5/6] Error opening position:`, error.message);
-    if ((await verifyPositionOnChain()).status !== 'none') {
+    if ((await verifyPositionOnChain(hyperliquid, state)).status !== 'none') {
       return;  // keep the intent: on-chain exposure must be reconciled
     }
   }
@@ -534,19 +440,6 @@ async function closeAndReopen(currentPosition, reason, newOpportunity) {
 async function displayStatus() {
   const now = new Date();
 
-  // ANSI color codes
-  const colors = {
-    reset: '\x1b[0m',
-    bright: '\x1b[1m',
-    dim: '\x1b[2m',
-    cyan: '\x1b[36m',
-    green: '\x1b[32m',
-    yellow: '\x1b[33m',
-    red: '\x1b[31m',
-    blue: '\x1b[34m',
-    magenta: '\x1b[35m'
-  };
-
   console.log(colors.dim + '─'.repeat(80) + colors.reset);
   console.log(`${colors.bright}${colors.cyan}📊 Bot Status${PAPER ? ' [PAPER TRADING]' : ''}${colors.reset} - ${colors.dim}${now.toLocaleString()}${colors.reset}`);
   console.log(colors.dim + '─'.repeat(80) + colors.reset);
@@ -564,92 +457,7 @@ async function displayStatus() {
     await runGuardedCycle();
   }
 
-  if (hasPosition(state)) {
-    const position = getCurrentPosition(state);
-
-    // Calculate time info
-    const age = getPositionAge(position);
-    const ageHours = age / (1000 * 60 * 60);
-    const ageDays = age / (1000 * 60 * 60 * 24);
-    const canClose = canClosePosition(position, MIN_HOLD_TIME_MS);
-    const minHoldDays = MIN_HOLD_TIME_MS / (1000 * 60 * 60 * 24);
-
-    // Calculate time until can rebalance
-    const timeUntilCanClose = MIN_HOLD_TIME_MS - age;
-    const daysUntilCanClose = timeUntilCanClose / (1000 * 60 * 60 * 24);
-    const hoursUntilCanClose = timeUntilCanClose / (1000 * 60 * 60);
-
-    console.log(`${colors.bright}Position:${colors.reset} ${colors.cyan}${position.symbol}${colors.reset} Delta-Neutral`);
-
-    const perpValue = Number.isFinite(position.perpEntryPrice) ? position.perpSize * position.perpEntryPrice : NaN;
-    const spotValue = Number.isFinite(position.spotEntryPrice) ? position.spotSize * position.spotEntryPrice : NaN;
-    const totalValue = perpValue + spotValue;
-
-    console.log(`  PERP:  SHORT ${position.perpSize} @ $${formatPrice(position.perpEntryPrice)} ${colors.dim}($${formatKnown(perpValue)})${colors.reset}`);
-    console.log(`  SPOT:  LONG ${position.spotSize} @ $${formatPrice(position.spotEntryPrice)} ${colors.dim}($${formatKnown(spotValue)})${colors.reset}`);
-    console.log(`  ${colors.bright}Total Entry Value: $${formatKnown(totalValue)}${colors.reset}`);
-    console.log();
-
-    const fundingColor = position.annualizedFunding >= 0 ? colors.green : colors.red;
-    console.log(`${colors.bright}Funding at entry:${colors.reset} ${fundingColor}${formatKnown(position.annualizedFunding == null ? null : position.annualizedFunding * 100)}% annualized${colors.reset}`);
-    console.log(`  Hourly Rate: ${fundingColor}${formatKnown(position.fundingRate == null ? null : position.fundingRate * 100, 4)}%${colors.reset}`);
-    console.log(`  Expected/hour at entry: ${colors.green}$${formatKnown(position.fundingRate == null ? null : position.positionValue * position.fundingRate, 4)}${colors.reset}`);
-
-    // Fetch accumulated funding for current position
-    try {
-      if (!Number.isFinite(position.openTime)) throw new Error('Opening time unknown');
-      const fundingHistory = await hyperliquid.getUserFundingHistory(null, position.openTime);
-
-      // Filter for current position symbol
-      const perpSymbol = position.perpSymbol;
-      const positionFunding = fundingHistory.accumulated[perpSymbol] || 0;
-
-      if (positionFunding !== 0) {
-        const earnedColor = positionFunding >= 0 ? colors.green : colors.red;
-        const sign = positionFunding >= 0 ? '+' : '';
-        console.log(`  ${colors.bright}Accumulated Earned:${colors.reset} ${earnedColor}${sign}$${positionFunding.toFixed(4)}${colors.reset} ${colors.dim}(since open)${colors.reset}`);
-      }
-    } catch (error) {
-      // Silently fail if funding history unavailable
-      console.log(`  ${colors.dim}(Accumulated funding unavailable)${colors.reset}`);
-    }
-
-    console.log();
-
-    if (!Number.isFinite(position.openTime)) {
-      console.log('Age: unknown');
-    } else if (ageDays >= 1) {
-      console.log(`${colors.bright}Age:${colors.reset} ${colors.yellow}${ageDays.toFixed(2)} days${colors.reset} ${colors.dim}(${ageHours.toFixed(1)} hours)${colors.reset}`);
-    } else {
-      console.log(`${colors.bright}Age:${colors.reset} ${colors.yellow}${ageHours.toFixed(1)} hours${colors.reset}`);
-    }
-
-    console.log(`${colors.dim}Opened: ${Number.isFinite(position.openTime) ? new Date(position.openTime).toLocaleString() : 'unknown'}${colors.reset}`);
-    console.log();
-
-    if (!Number.isFinite(position.openTime)) {
-      console.log('Opening time unknown; minimum holding period cannot be verified.');
-    } else if (canClose) {
-      console.log(`${colors.green}✅ Can Switch/Close: YES${colors.reset} ${colors.dim}(held > ${minHoldDays} days)${colors.reset}`);
-      console.log(`   ${colors.dim}Switches only if the expected funding gain beats fees + spread${colors.reset}`);
-    } else {
-      if (daysUntilCanClose >= 1) {
-        console.log(`${colors.yellow}⏳ Can Switch/Close: NO${colors.reset} ${colors.dim}(need ${daysUntilCanClose.toFixed(2)} more days)${colors.reset}`);
-      } else {
-        console.log(`${colors.yellow}⏳ Can Switch/Close: NO${colors.reset} ${colors.dim}(need ${hoursUntilCanClose.toFixed(1)} more hours)${colors.reset}`);
-      }
-      console.log(`   ${colors.dim}Min hold: ${minHoldDays} days${colors.reset}`);
-      console.log(`   ${colors.dim}Can close at: ${new Date(position.openTime + MIN_HOLD_TIME_MS).toLocaleString()}${colors.reset}`);
-    }
-
-  } else {
-    console.log(`${colors.bright}Position:${colors.reset} None`);
-    console.log(`${colors.bright}Status:${colors.reset} 🔍 Looking for opportunities...`);
-    const nextCheck = state.lastOpportunityCheck
-      ? new Date(state.lastOpportunityCheck + CHECK_INTERVAL_MS).toLocaleTimeString()
-      : 'on next cycle';
-    console.log(`${colors.dim}Next check: ${nextCheck}${colors.reset}`);
-  }
+  await printPositionStatus(state, hyperliquid, MIN_HOLD_TIME_MS, CHECK_INTERVAL_MS);
 
   console.log(colors.dim + '─'.repeat(80) + colors.reset);
   console.log();
@@ -792,4 +600,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   });
 }
 
-export { timestamp, verifyPositionOnChain, reconcilePendingIntent };
+export { timestamp };

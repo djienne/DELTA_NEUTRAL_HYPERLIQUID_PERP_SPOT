@@ -8,7 +8,7 @@ import { PaperConnector } from '../utils/paper-exchange.js';
 import { findBestOpportunities } from '../utils/opportunity.js';
 import { openDeltaNeutralPosition, closeDeltaNeutralPosition } from '../utils/trade.js';
 import { recordPosition } from '../utils/state.js';
-import { verifyPositionOnChain } from '../bot.js';
+import { verifyPositionOnChain } from '../utils/recovery.js';
 
 const config = JSON.parse(fs.readFileSync('config.json','utf8'));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hl-paper-smoke-'));

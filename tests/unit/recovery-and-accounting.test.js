@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { exchange } from './fake-exchange.js';
-import { verifyPositionOnChain, reconcilePendingIntent } from '../../bot.js';
+import { verifyPositionOnChain, reconcilePendingIntent } from '../../utils/recovery.js';
 import { analyzeHedgeNeeds, autoHedgeAll, createHedge } from '../../utils/hedge.js';
 import { closeDeltaNeutralPosition, openDeltaNeutralPosition } from '../../utils/trade.js';
 import { getHistoryStats } from '../../utils/state.js';
