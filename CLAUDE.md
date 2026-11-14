@@ -92,7 +92,7 @@ cost = 2 × (perp fee + spot fee) + candidate perp + spot spread      (close-onl
   Acting on single negative hours caused churn that lost money.
 - **H ≈ 8 days** is measured, not tuned. It is the regression slope of the realized 14-day funding gap on today's 7d-average
   gap (2 years, 8 pairs; ≈9 and ≈7 days on each half). At base fees a switch needs a gap of about 12 APY points.
-- **minHoldTimeDays = 7**: out-of-sample results are flat for 1–30 days. 7 days makes each decision use a fresh 7d window.
+- **minHoldTimeDays = 30**: out-of-sample results are flat for 1–30 days (mean of 14 staggered starts: 7d 39.5/22.0%, 30d 40.6/21.8%); 30 days trades half as often, so less real slippage and legging risk than the replay models.
 - `tests/check-switch-calibration.js` re-estimates H and replays the production `switchEdge` out-of-sample against the
   old rule and against never switching. Change config only if the estimates leave the plateau. The configured rule opens only
   ~10–20 positions per year-long half, so P&L differences are noisy; trust the direction and the β estimate, not the exact APY.
@@ -127,7 +127,7 @@ cost = 2 × (perp fee + spot fee) + candidate perp + spot spread      (close-onl
 | `trading.balanceUtilizationPercent` | 95 |
 | `trading.maxSlippagePercent` | 5 (percent) |
 | `trading.takerFeeRate` / `spotTakerFeeRate` | 0.00045 / 0.0007 per leg, used by `switchEdge` and fee fallback |
-| `bot.minHoldTimeDays` / `bot.switchHorizonDays` | 7 / 8 (see above) |
+| `bot.minHoldTimeDays` / `bot.switchHorizonDays` | 30 / 8 (see above) |
 | `bot.maxBalanceImbalancePercent` | 10: hold for a manual transfer when \|PERP − SPOT\| > 10% of free USDC (derivation in `notes.rebalance`) |
 | `paper.*` | paper account start USDC per side, simulated transfer delay (paper only) |
 | `thresholds.*` | entry filters: volume, bid-ask spread, basis, minimum funding APY |

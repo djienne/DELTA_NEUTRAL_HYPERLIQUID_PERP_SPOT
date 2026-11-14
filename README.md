@@ -97,7 +97,7 @@ Real-time display shows: position details, funding info, accumulated earnings, p
 - Filters by liquidity ($75M+ volume, tight spreads)
 - Sets leverage to 1x isolated per-pair before opening
 - Opens positions using 95% of balance
-- Holds at least 7 days (configurable), then **switches only if the expected gain beats the cost**:
+- Holds at least 30 days (configurable), then **switches only if the expected gain beats the cost**:
   `(candidate 7d avg − held 7d avg) × switchHorizonDays > taker fees on 4 legs + spreads` (≈12 APY-point gap at base fees)
 - Closes a position whose 7d average turned negative when its expected loss over the horizon exceeds the closing cost, even inside the minimum hold
 - Fixes unhedged or mismatched legs at startup (it never moves USDC between PERP and SPOT: see below)
@@ -195,7 +195,7 @@ For a sub-account, create the API key on the master account. Move USDC between t
 - `trading.maxOrderSizeUSD`: Optional hard cap for each new position size (`null` means uncapped)
 - `trading.maxSlippagePercent`: Market order slippage budget, expressed as a percent
 - `trading.takerFeeRate` / `trading.spotTakerFeeRate`: Taker fee per leg (perp 0.045%, spot 0.07% at base tier); used by the switch rule and when fills lack fee data
-- `bot.minHoldTimeDays`: Minimum hold before a switch (default: 7)
+- `bot.minHoldTimeDays`: Minimum hold before a switch (config: 30; code default 7)
 - `bot.switchHorizonDays`: Days of a 7d-average funding gap expected to be earned (default: 8, measured)
 - `bot.maxBalanceImbalancePercent`: Hold and ask for a manual transfer when |PERP − SPOT| exceeds this % of the total (default: 10 = 50/50 ± 5 points)
 - `paper.startPerpUSDC` / `paper.startSpotUSDC` / `paper.transferDelayMinutes`: Paper account start and simulated transfer delay (paper only)
